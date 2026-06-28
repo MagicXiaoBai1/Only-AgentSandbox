@@ -1,0 +1,9 @@
+[package]
+name = "oas-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+oas-types = { path = "../oas-types" }
