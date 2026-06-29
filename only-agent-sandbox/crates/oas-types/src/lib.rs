@@ -53,7 +53,7 @@ pub enum ContainerExitReason {
 // ---------------------------------------------------------------------------
 
 /// `PodSandboxMetadata`，原样存取（§6 红线 1）。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SandboxMetadata {
     pub name: String,
     pub namespace: String,
@@ -63,7 +63,7 @@ pub struct SandboxMetadata {
 }
 
 /// `ContainerMetadata`，原样存取。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContainerMetadata {
     pub name: String,
     pub attempt: u32,

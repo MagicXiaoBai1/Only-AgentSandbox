@@ -1,0 +1,14 @@
+[package]
+name = "oas-mock"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+tokio = { workspace = true }
+oas-types = { path = "../oas-types" }
+oas-driver = { path = "../oas-driver" }
+oas-net = { path = "../oas-net" }
+oas-storage = { path = "../oas-storage" }
+oas-store = { path = "../oas-store" }
+oas-manager = { path = "../oas-manager" }

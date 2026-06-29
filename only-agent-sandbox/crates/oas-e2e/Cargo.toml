@@ -1,0 +1,19 @@
+[package]
+name = "oas-e2e"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+oas-cri = { path = "../oas-cri" }
+oas-manager = { path = "../oas-manager" }
+oas-driver = { path = "../oas-driver" }
+oas-net = { path = "../oas-net" }
+oas-storage = { path = "../oas-storage" }
+oas-store = { path = "../oas-store" }
+oas-types = { path = "../oas-types" }
+oas-mock = { path = "../oas-mock" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+async-stream = { workspace = true }

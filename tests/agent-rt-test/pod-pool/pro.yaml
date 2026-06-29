@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sb-pro-__ID__
+  namespace: default
+  annotations:
+    agent-sandbox/type: "1"
+spec:
+  runtimeClassName: agent-firecracker
+  restartPolicy: Never
+  containers:
+    - name: workload
+      image: "agent-sandbox/pro:1.0"
+      resources:
+        requests: { cpu: "4", memory: "8Gi" }
+        limits:   { cpu: "4", memory: "8Gi" }
