@@ -6,6 +6,28 @@
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// 沙箱标识（manager 生成、跨层共享的 VM 句柄）
+// ---------------------------------------------------------------------------
+
+/// 沙箱 / VM 唯一标识。manager 的 `IdGenerator` 生成，作为对外 CRI 句柄与对内
+/// driver 句柄的统一键（取代昔日分裂的 `sandbox_id` + `vm_id`）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SandboxId(pub String);
+
+impl SandboxId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SandboxId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IPAM 租约（net 与 store 共用）
 // ---------------------------------------------------------------------------
 
@@ -114,8 +136,7 @@ pub struct DnsConfig {
 
 /// `sandbox` 表记录。`pod_uid` 为 ★幂等键；metadata/labels/annotations 原样。
 ///
-/// 注意：`vm_id` 用 `u64` 而非 `oas_driver::VmId`，避免 `oas-types` 反向依赖
-/// `oas-driver`。
+/// `sandbox_id` 既是 CRI 对外句柄也是 driver 的 VM 句柄（统一键，无独立 vm_id）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxRecord {
     pub sandbox_id: String,
@@ -125,7 +146,6 @@ pub struct SandboxRecord {
     pub labels: HashMap<String, String>,
     pub annotations: HashMap<String, String>,
     pub type_id: u8,
-    pub vm_id: u64,
     pub netns_path: String,
     pub tap_name: String,
     pub mac: String,

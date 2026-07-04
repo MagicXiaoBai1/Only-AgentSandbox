@@ -618,6 +618,7 @@ name = "oas-driver"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "oas-types",
  "thiserror 1.0.69",
 ]
 

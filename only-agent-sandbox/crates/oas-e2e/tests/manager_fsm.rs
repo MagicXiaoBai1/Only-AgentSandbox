@@ -21,7 +21,6 @@ async fn run_sandbox_happy() {
     assert_eq!(rec.state, SandboxState::Ready);
     assert_eq!(rec.pod_uid, "uid1");
     assert!(!rec.pod_ip.is_empty());
-    assert!(rec.vm_id > 0);
     assert_eq!(rec.created_at, 1_700_000_000);
     assert_eq!(env.driver.create_count(), 1);
     assert_eq!(env.net.setup_count(), 1);

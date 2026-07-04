@@ -13,19 +13,20 @@
 //! 实现就绪后 `main.rs` 改用真后端，本 crate 退回仅测试用。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use oas_driver::{
     ContainerRuntimeState, ContainerRuntimeStatus, ContainerSpec, DriverError, FirecrackerDriver,
-    VmId, VmLifecycle, VmSpec, VmStatus,
+    VmLifecycle, VmSpec, VmStatus,
 };
 use oas_manager::{OasError, VmReadiness};
 use oas_net::{NetConfig, NetError, NetworkManager};
 use oas_storage::{DiskConfig, StorageError, StorageManager};
 use oas_store::Store;
+use oas_types::SandboxId;
 
 // ---- MockDriver ------------------------------------------------------------
 
@@ -33,17 +34,16 @@ use oas_store::Store;
 pub struct MockDriver {
     fail_create: AtomicBool,
     creates: Mutex<Vec<(String, u8)>>,
-    deletes: Mutex<Vec<u64>>,
-    gets: Mutex<Vec<u64>>,
+    deletes: Mutex<Vec<String>>,
+    gets: Mutex<Vec<String>>,
     lists: Mutex<Vec<()>>,
-    statuses: Mutex<HashMap<u64, VmStatus>>,
-    next_vm_id: AtomicU64,
+    statuses: Mutex<HashMap<String, VmStatus>>,
     // 容器原语调用记录（§2.8）：MVP no-op，仅记调用 + 可注入实际态。
-    container_creates: Mutex<Vec<(u64, String)>>,
-    container_starts: Mutex<Vec<(u64, String)>>,
-    container_stops: Mutex<Vec<(u64, String)>>,
-    container_removes: Mutex<Vec<(u64, String)>>,
-    container_status_gets: Mutex<Vec<(u64, String)>>,
+    container_creates: Mutex<Vec<(String, String)>>,
+    container_starts: Mutex<Vec<(String, String)>>,
+    container_stops: Mutex<Vec<(String, String)>>,
+    container_removes: Mutex<Vec<(String, String)>>,
+    container_status_gets: Mutex<Vec<(String, String)>>,
     container_statuses: Mutex<HashMap<String, ContainerRuntimeStatus>>,
 }
 
@@ -56,7 +56,6 @@ impl MockDriver {
             gets: Mutex::new(Vec::new()),
             lists: Mutex::new(Vec::new()),
             statuses: Mutex::new(HashMap::new()),
-            next_vm_id: AtomicU64::new(1),
             container_creates: Mutex::new(Vec::new()),
             container_starts: Mutex::new(Vec::new()),
             container_stops: Mutex::new(Vec::new()),
@@ -114,42 +113,46 @@ impl Default for MockDriver {
 impl FirecrackerDriver for MockDriver {
     async fn create_vm(
         &self,
+        id: &SandboxId,
         netns_path: &str,
         type_id: u8,
         _spec: VmSpec,
         _event_fd: std::os::fd::RawFd,
-    ) -> Result<VmId, DriverError> {
+    ) -> Result<(), DriverError> {
         if self.fail_create.load(Ordering::Relaxed) {
             return Err(DriverError::Other("injected create_vm failure".into()));
         }
-        let id = self.next_vm_id.fetch_add(1, Ordering::Relaxed);
+        let key = id.as_str().to_string();
         self.creates
             .lock()
             .unwrap()
             .push((netns_path.to_string(), type_id));
         self.statuses.lock().unwrap().insert(
-            id,
+            key.clone(),
             VmStatus {
+                id: SandboxId(key),
                 started: true,
                 healthy: true,
                 lifecycle: VmLifecycle::Running,
             },
         );
-        Ok(VmId(id))
+        Ok(())
     }
 
-    async fn get_vm(&self, id: VmId) -> Result<VmStatus, DriverError> {
-        self.gets.lock().unwrap().push(id.0);
-        match self.statuses.lock().unwrap().get(&id.0) {
+    async fn get_vm(&self, id: &SandboxId) -> Result<VmStatus, DriverError> {
+        let key = id.as_str().to_string();
+        self.gets.lock().unwrap().push(key.clone());
+        match self.statuses.lock().unwrap().get(&key) {
             Some(s) => Ok(s.clone()),
-            None => Err(DriverError::NotFound(id.0)),
+            None => Err(DriverError::NotFound(key)),
         }
     }
 
-    async fn delete_vm(&self, id: VmId) -> Result<(), DriverError> {
-        self.deletes.lock().unwrap().push(id.0);
+    async fn delete_vm(&self, id: &SandboxId) -> Result<(), DriverError> {
+        let key = id.as_str().to_string();
+        self.deletes.lock().unwrap().push(key.clone());
         let mut st = self.statuses.lock().unwrap();
-        if let Some(s) = st.get_mut(&id.0) {
+        if let Some(s) = st.get_mut(&key) {
             s.lifecycle = VmLifecycle::Stopped;
         }
         Ok(())
@@ -162,55 +165,55 @@ impl FirecrackerDriver for MockDriver {
 
     async fn create_container(
         &self,
-        vm_id: VmId,
+        vm_id: &SandboxId,
         container_id: &str,
         _spec: ContainerSpec,
     ) -> Result<(), DriverError> {
         self.container_creates
             .lock()
             .unwrap()
-            .push((vm_id.0, container_id.to_string()));
+            .push((vm_id.as_str().to_string(), container_id.to_string()));
         Ok(())
     }
 
-    async fn start_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError> {
+    async fn start_container(&self, vm_id: &SandboxId, container_id: &str) -> Result<(), DriverError> {
         self.container_starts
             .lock()
             .unwrap()
-            .push((vm_id.0, container_id.to_string()));
+            .push((vm_id.as_str().to_string(), container_id.to_string()));
         Ok(())
     }
 
     async fn stop_container(
         &self,
-        vm_id: VmId,
+        vm_id: &SandboxId,
         container_id: &str,
         _timeout_sec: i64,
     ) -> Result<(), DriverError> {
         self.container_stops
             .lock()
             .unwrap()
-            .push((vm_id.0, container_id.to_string()));
+            .push((vm_id.as_str().to_string(), container_id.to_string()));
         Ok(())
     }
 
-    async fn remove_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError> {
+    async fn remove_container(&self, vm_id: &SandboxId, container_id: &str) -> Result<(), DriverError> {
         self.container_removes
             .lock()
             .unwrap()
-            .push((vm_id.0, container_id.to_string()));
+            .push((vm_id.as_str().to_string(), container_id.to_string()));
         Ok(())
     }
 
     async fn get_container_status(
         &self,
-        vm_id: VmId,
+        vm_id: &SandboxId,
         container_id: &str,
     ) -> Result<ContainerRuntimeStatus, DriverError> {
         self.container_status_gets
             .lock()
             .unwrap()
-            .push((vm_id.0, container_id.to_string()));
+            .push((vm_id.as_str().to_string(), container_id.to_string()));
         Ok(self
             .container_statuses
             .lock()
@@ -362,7 +365,7 @@ pub struct ImmediateReadiness;
 
 #[async_trait]
 impl VmReadiness for ImmediateReadiness {
-    async fn wait_ready(&self, _vm_id: VmId, _timeout: Duration) -> Result<(), OasError> {
+    async fn wait_ready(&self, _id: &SandboxId, _timeout: Duration) -> Result<(), OasError> {
         Ok(())
     }
 }
@@ -372,7 +375,7 @@ pub struct NeverReadyReadiness;
 
 #[async_trait]
 impl VmReadiness for NeverReadyReadiness {
-    async fn wait_ready(&self, _vm_id: VmId, _timeout: Duration) -> Result<(), OasError> {
+    async fn wait_ready(&self, _id: &SandboxId, _timeout: Duration) -> Result<(), OasError> {
         tokio::time::sleep(Duration::from_millis(20)).await;
         Err(OasError::Unavailable(
             "vm not ready (never-ready fake)".into(),

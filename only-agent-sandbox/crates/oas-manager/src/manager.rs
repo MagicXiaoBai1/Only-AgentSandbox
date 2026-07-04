@@ -9,12 +9,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oas_driver::{ContainerSpec, DriverError, FirecrackerDriver, VmId, VmLifecycle, VmSpec};
+use oas_driver::{ContainerSpec, DriverError, FirecrackerDriver, VmLifecycle, VmSpec};
 use oas_net::{NetConfig, NetError, NetworkManager};
 use oas_storage::{DiskConfig, StorageError, StorageManager};
 use oas_store::{Store, StoreError};
 use oas_types::{
-    ContainerExitReason, ContainerFilter, ContainerRecord, ContainerState, IpLease,
+    ContainerExitReason, ContainerFilter, ContainerRecord, ContainerState, IpLease, SandboxId,
     SandboxFilter, SandboxRecord, SandboxState,
 };
 
@@ -65,12 +65,6 @@ impl OasManager {
             id_gen: IdGenerator::new(),
             readiness,
         }
-    }
-
-    /// 取 sandbox 的 vm_id（容器原语下沉 driver 时定位 VM）。
-    fn vm_id_of(&self, sandbox_id: &str) -> Result<VmId, OasError> {
-        let sb = self.store.get_sandbox(sandbox_id).map_err(map_store_err)?;
-        Ok(VmId(sb.vm_id))
     }
 }
 
@@ -209,7 +203,7 @@ impl Manager for OasManager {
         let sandbox_id = self.id_gen.sandbox_id();
 
         // net.setup（内部 lease_ip，崩溃后不重复分配）。
-        let net_cfg = match self.net.setup(&sandbox_id).await {
+        let net_cfg = match self.net.setup(sandbox_id.as_str()).await {
             Ok(c) => c,
             Err(e) => return Err(map_net_err(e)),
         };
@@ -217,7 +211,7 @@ impl Manager for OasManager {
         // storage.provision。
         let disk = match self
             .storage
-            .provision(&sandbox_id, req.type_id, req.cloud_disk_ref.as_deref())
+            .provision(sandbox_id.as_str(), req.type_id, req.cloud_disk_ref.as_deref())
             .await
         {
             Ok(d) => d,
@@ -232,34 +226,34 @@ impl Manager for OasManager {
             rw_layer_path: disk.rw_layer_path.clone(),
             cloud_disk_dev: disk.cloud_disk_dev.clone(),
         };
-        let vm_id = match self
+        if let Err(e) = self
             .driver
-            .create_vm(&net_cfg.netns_path, req.type_id, spec, -1)
+            .create_vm(&sandbox_id, &net_cfg.netns_path, req.type_id, spec, -1)
             .await
         {
-            Ok(id) => id,
-            Err(e) => {
-                let oe = map_driver_err(e);
-                self.rollback_create(&net_cfg, &disk, None).await;
-                return Err(oe);
-            }
-        };
+            let oe = map_driver_err(e);
+            self.rollback_create(&net_cfg, &disk, None).await;
+            return Err(oe);
+        }
 
         // 等就绪（超时 → 回滚）。
-        if let Err(oe) = self.readiness.wait_ready(vm_id, READINESS_TIMEOUT).await {
-            self.rollback_create(&net_cfg, &disk, Some(vm_id)).await;
+        if let Err(oe) = self
+            .readiness
+            .wait_ready(&sandbox_id, READINESS_TIMEOUT)
+            .await
+        {
+            self.rollback_create(&net_cfg, &disk, Some(&sandbox_id)).await;
             return Err(oe);
         }
 
         // 落库 READY（单事务）。
         let rec = SandboxRecord {
-            sandbox_id: sandbox_id.clone(),
+            sandbox_id: sandbox_id.as_str().to_string(),
             pod_uid: req.metadata.uid.clone(),
             metadata: req.metadata.clone(),
             labels: req.labels.clone(),
             annotations: req.annotations.clone(),
             type_id: req.type_id,
-            vm_id: vm_id.0,
             netns_path: net_cfg.netns_path.clone(),
             tap_name: net_cfg.tap_name.clone(),
             mac: net_cfg.mac.clone(),
@@ -275,20 +269,20 @@ impl Manager for OasManager {
             .store
             .transaction(Box::new(move |t| t.put_sandbox(&rec_clone)))
         {
-            self.rollback_create(&net_cfg, &disk, Some(vm_id)).await;
+            self.rollback_create(&net_cfg, &disk, Some(&sandbox_id)).await;
             return Err(map_store_err(e));
         }
-        Ok(sandbox_id)
+        Ok(sandbox_id.0)
     }
 
     async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), OasError> {
         let _guard = self.locks.lock(sandbox_id).await;
         let rec = self.store.get_sandbox(sandbox_id).map_err(map_store_err)?; // NotFound 透传，CRI 吞
-        let vm_id = VmId(rec.vm_id);
+        let sid = SandboxId(sandbox_id.to_string());
 
-        let _ = self.driver.delete_vm(vm_id).await; // 幂等
+        let _ = self.driver.delete_vm(&sid).await; // 幂等
         for _ in 0..MAX_STOP_POLLS {
-            match self.driver.get_vm(vm_id).await {
+            match self.driver.get_vm(&sid).await {
                 Ok(s) if s.lifecycle == VmLifecycle::Stopped => break,
                 Ok(_) => tokio::time::sleep(STOP_POLL_INTERVAL).await,
                 Err(DriverError::NotFound(_)) => break,
@@ -414,9 +408,10 @@ impl Manager for OasManager {
             env: rec.env.clone(),
             cwd: req.working_dir.clone(),
         };
+        let sid = SandboxId(sb.sandbox_id.clone());
         if let Err(e) = self
             .driver
-            .create_container(VmId(sb.vm_id), &container_id, spec)
+            .create_container(&sid, &container_id, spec)
             .await
         {
             let cid = container_id.clone();
@@ -442,10 +437,10 @@ impl Manager for OasManager {
         match c.state {
             ContainerState::Running => Ok(()), // 幂等
             ContainerState::Created => {
-                let vm_id = self.vm_id_of(&c.sandbox_id)?;
+                let sid = SandboxId(c.sandbox_id.clone());
                 // 经 driver 下沉（§2.8）：在 VM 内启动容器进程。MVP no-op。
                 self.driver
-                    .start_container(vm_id, container_id)
+                    .start_container(&sid, container_id)
                     .await
                     .map_err(map_driver_err)?;
                 let mut c2 = c.clone();
@@ -477,12 +472,12 @@ impl Manager for OasManager {
         if c.state == ContainerState::Exited {
             return Ok(()); // 幂等
         }
-        let vm_id = self.vm_id_of(&c.sandbox_id)?;
+        let sid = SandboxId(c.sandbox_id.clone());
         // 经 driver 下沉（§2.8）：在 VM 内停止容器进程。best-effort：失败不阻断置 EXITED
         // （红线 2：显式停止，非 VM-alive 反推 exit_code）。
         if let Err(e) = self
             .driver
-            .stop_container(vm_id, container_id, timeout)
+            .stop_container(&sid, container_id, timeout)
             .await
         {
             tracing::warn!(target: "oas-manager", "driver stop_container failed (proceeding): {e}");
@@ -507,9 +502,9 @@ impl Manager for OasManager {
             Err(e) => return Err(map_store_err(e)),
         };
         let _guard = self.locks.lock(&sid).await;
-        let vm_id = self.vm_id_of(&sid)?;
+        let vm_id = SandboxId(sid.clone());
         // 经 driver 下沉（§2.8）：在 VM 内移除容器登记。best-effort。
-        if let Err(e) = self.driver.remove_container(vm_id, container_id).await {
+        if let Err(e) = self.driver.remove_container(&vm_id, container_id).await {
             tracing::warn!(target: "oas-manager", "driver remove_container failed (proceeding): {e}");
         }
         let cid = container_id.to_string();
@@ -526,16 +521,15 @@ impl Manager for OasManager {
             .map_err(map_store_err)?;
         // 经 driver 下沉（§2.8）：拉 VM 内实际态做 reconcile 对账。声明态事实源仍是 store，
         // driver 实际态仅用于对账/补全 pid——MVP 不自动改 store 状态机（红线 2：不反推 exit_code）。
-        if let Ok(vm_id) = self.vm_id_of(&c.sandbox_id) {
-            if let Ok(rt) = self.driver.get_container_status(vm_id, container_id).await {
-                tracing::debug!(
-                    target: "oas-manager",
-                    container_id,
-                    declared_state = ?c.state,
-                    runtime_state = ?rt.state,
-                    "container_status reconcile",
-                );
-            }
+        let sid = SandboxId(c.sandbox_id.clone());
+        if let Ok(rt) = self.driver.get_container_status(&sid, container_id).await {
+            tracing::debug!(
+                target: "oas-manager",
+                container_id,
+                declared_state = ?c.state,
+                runtime_state = ?rt.state,
+                "container_status reconcile",
+            );
         }
         Ok(c)
     }
@@ -583,9 +577,9 @@ impl OasManager {
         &self,
         net_cfg: &NetConfig,
         disk: &DiskConfig,
-        vm_id: Option<VmId>,
+        id: Option<&SandboxId>,
     ) {
-        if let Some(id) = vm_id {
+        if let Some(id) = id {
             let _ = self.driver.delete_vm(id).await;
         }
         let _ = self.storage.cleanup(disk).await;

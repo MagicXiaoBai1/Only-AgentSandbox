@@ -6,13 +6,13 @@
 
 use std::time::Duration;
 
-use oas_driver::VmId;
+use oas_types::SandboxId;
 
 use crate::OasError;
 
 /// VM 就绪等待。
 #[async_trait::async_trait]
 pub trait VmReadiness: Send + Sync {
-    /// 等待 `vm_id` 就绪，超时返回 `Err`（→ 回滚 `delete_vm` + cleanup + teardown）。
-    async fn wait_ready(&self, vm_id: VmId, timeout: Duration) -> Result<(), OasError>;
+    /// 等待 `id` 就绪，超时返回 `Err`（→ 回滚 `delete_vm` + cleanup + teardown）。
+    async fn wait_ready(&self, id: &SandboxId, timeout: Duration) -> Result<(), OasError>;
 }

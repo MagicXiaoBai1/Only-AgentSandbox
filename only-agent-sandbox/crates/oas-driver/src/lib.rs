@@ -14,9 +14,7 @@
 
 use std::os::fd::RawFd;
 
-/// VM 标识。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VmId(pub u64);
+use oas_types::SandboxId;
 
 /// VM 生命周期状态（§3.3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,9 +27,11 @@ pub enum VmLifecycle {
     Stopped,
 }
 
-/// VM 实际态（由 driver `get_vm` 返回，供 reconcile 对账声明态 vs 实际态）。
+/// VM 实际态（由 driver `get_vm` / `list_vm` 返回，供 reconcile 对账声明态 vs 实际态）。
 #[derive(Debug, Clone)]
 pub struct VmStatus {
+    /// 对应沙箱句柄——`list_vm` 据此把列出的 VM 映射回 store 的 `SandboxRecord`。
+    pub id: SandboxId,
     pub started: bool,
     pub healthy: bool,
     pub lifecycle: VmLifecycle,
@@ -50,9 +50,9 @@ pub struct VmSpec {
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
     #[error("vm not found: {0}")]
-    NotFound(u64),
+    NotFound(String),
     #[error("vm already exists: {0}")]
-    Exists(u64),
+    Exists(String),
     #[error("snapshot error: {0}")]
     Snapshot(String),
     #[error("firecracker api error: {0}")]
@@ -64,7 +64,7 @@ pub enum DriverError {
 }
 
 // ---------------------------------------------------------------------------
-// 容器原语类型（§2.8）——driver 本地类型，不依赖 oas-types，保持依赖方向不反转。
+// 容器原语类型（§2.8）——driver 本地类型（仅 `SandboxId` 自 oas-types 引入）。
 // ---------------------------------------------------------------------------
 
 /// 待在 VM 内启动的容器进程规格（编排层 `CreateContainerRequest` 映射而来）。
@@ -97,24 +97,27 @@ pub struct ContainerRuntimeStatus {
 
 /// 编排层 → Firecracker 原语层接口（§2.1）。
 ///
-/// `create_vm` 原子幂等：同 `(type_id, netns)` 已在建则返回旧 `VmId`；
+/// `id`（`SandboxId`）由编排层生成并传入，是 VM 的唯一句柄——driver 不再造 id。
+/// `create_vm` 原子幂等：同 `id` 已在建则直接 `Ok(())`；
 /// `delete_vm` 幂等：删不存在返回 `Ok`，不保证立即停止，调用方轮询 `get_vm` 到 `Stopped`。
 #[async_trait::async_trait]
 pub trait FirecrackerDriver: Send + Sync {
-    /// 原子幂等建 VM。`type_id` 决定 vCPU/mem/rootfs/drive 拓扑；
+    /// 原子幂等建 VM。`id` 为编排层分配的沙箱句柄（兼作 VM 句柄）；
+    /// `type_id` 决定 vCPU/mem/rootfs/drive 拓扑；
     /// `spec` 把 per-VM 可写层 / 云盘 PATCH 进 snapshot 预留的 drive slot；
     /// 就绪时写 `event_fd` 通知。
     async fn create_vm(
         &self,
+        id: &SandboxId,
         netns_path: &str,
         type_id: u8,
         spec: VmSpec,
         event_fd: RawFd,
-    ) -> Result<VmId, DriverError>;
+    ) -> Result<(), DriverError>;
 
-    async fn get_vm(&self, id: VmId) -> Result<VmStatus, DriverError>;
+    async fn get_vm(&self, id: &SandboxId) -> Result<VmStatus, DriverError>;
 
-    async fn delete_vm(&self, id: VmId) -> Result<(), DriverError>;
+    async fn delete_vm(&self, id: &SandboxId) -> Result<(), DriverError>;
 
     async fn list_vm(&self) -> Result<Vec<VmStatus>, DriverError>;
 
@@ -124,29 +127,29 @@ pub trait FirecrackerDriver: Send + Sync {
     /// 在 `vm_id` 对应的 VM 内登记一个容器（MVP no-op）。
     async fn create_container(
         &self,
-        vm_id: VmId,
+        vm_id: &SandboxId,
         container_id: &str,
         spec: ContainerSpec,
     ) -> Result<(), DriverError>;
 
     /// 在 VM 内启动已登记容器进程（MVP no-op）。
-    async fn start_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError>;
+    async fn start_container(&self, vm_id: &SandboxId, container_id: &str) -> Result<(), DriverError>;
 
     /// 在 VM 内停止容器进程（MVP no-op）。
     async fn stop_container(
         &self,
-        vm_id: VmId,
+        vm_id: &SandboxId,
         container_id: &str,
         timeout_sec: i64,
     ) -> Result<(), DriverError>;
 
     /// 在 VM 内移除容器登记（MVP no-op）。
-    async fn remove_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError>;
+    async fn remove_container(&self, vm_id: &SandboxId, container_id: &str) -> Result<(), DriverError>;
 
     /// 查 VM 内容器实际态，供编排层 reconcile 对账（MVP 返回缺省态）。
     async fn get_container_status(
         &self,
-        vm_id: VmId,
+        vm_id: &SandboxId,
         container_id: &str,
     ) -> Result<ContainerRuntimeStatus, DriverError>;
 }

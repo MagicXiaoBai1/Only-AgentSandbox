@@ -25,7 +25,6 @@ fn sb(id: &str, uid: &str, state: SandboxState) -> SandboxRecord {
         labels: HashMap::new(),
         annotations: HashMap::new(),
         type_id: 0,
-        vm_id: 0,
         netns_path: format!("/ns/{id}"),
         tap_name: "tap0".into(),
         mac: "aa".into(),
@@ -92,9 +91,9 @@ fn sandbox_crud<S: Store>(make: &impl Fn() -> S) {
 
     // 覆盖写
     let mut r2 = r.clone();
-    r2.vm_id = 42;
+    r2.tap_name = "tap9".into();
     s.put_sandbox(&r2).unwrap();
-    assert_eq!(s.get_sandbox("sb1").unwrap().vm_id, 42);
+    assert_eq!(s.get_sandbox("sb1").unwrap().tap_name, "tap9");
 
     // 缺失 → NotFound
     match s.get_sandbox("nope") {
