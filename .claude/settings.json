@@ -8,10 +8,15 @@
       "Bash(:)",
       "Bash(cd /home/yunfei/Code/Only-AgentSandbox/only-agent-sandbox && rm -f /run/oas.sock && OAS_SOCKET=/run/oas.sock ./target/debug/oas-runtime)",
       "Bash(crictl --runtime-endpoint unix:///run/oas.sock --timeout 10s ps -a)",
-      "Bash(cargo clippy *)"
+      "Bash(cargo clippy *)",
+      "Bash(pwd && grep -rn \"tracing\" crates/*/Cargo.toml src/../Cargo.toml 2>/dev/null)",
+      "Read(//home/yunfei/Code/Only-AgentSandbox/only-agent-sandbox/**)",
+      "Bash(./target/debug/oas-runtime --help)",
+      "Bash(grep -n \"impl Builder\\\\|pub fn new\\\\|pub struct Builder\" /root/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/tonic-prost-build-0.14.6/src/lib.rs | head; echo \"=== how to construct ===\"; sed -n '/pub fn compile_protos\\(proto: impl AsRef<Path>\\)/,/^}/p' /root/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/tonic-prost-build-0.14.6/src/lib.rs | head -20)"
     ],
     "additionalDirectories": [
-      "/run"
+      "/run",
+      "/root/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/tonic-prost-build-0.14.6/src"
     ]
   }
 }

@@ -12,6 +12,9 @@ mod convert;
 mod error;
 mod unsupported;
 
+#[macro_use]
+mod log;
+
 mod image_svc;
 mod runtime_svc;
 

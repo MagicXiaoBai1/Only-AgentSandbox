@@ -13,7 +13,10 @@ oas-manager = { path = "crates/oas-manager" }
 oas-store = { path = "crates/oas-store" }
 oas-mock = { path = "crates/oas-mock" }
 tracing = { version = "0.1", features = ["log"] }
-env_logger = "0.11"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log"] }
+tracing-log = "0.2"
+tracing-appender = "0.2"
+clap = { version = "4", features = ["derive", "env"] }
 
 [workspace]
 resolver = "2"

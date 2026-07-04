@@ -8,6 +8,7 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
 tokio-stream = { workspace = true }
+tracing = "0.1"
 oas-manager = { path = "../oas-manager" }
 oas-types = { path = "../oas-types" }
 
