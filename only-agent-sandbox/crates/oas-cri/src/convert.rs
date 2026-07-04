@@ -369,6 +369,115 @@ pub fn image_info_to_image(i: &ImageInfo) -> pb::Image {
 }
 
 // ---------------------------------------------------------------------------
+// Records →minimal stats
+// ---------------------------------------------------------------------------
+
+pub fn record_to_container_stats(r: &oas_types::ContainerRecord) -> pb::ContainerStats {
+    let timestamp = r
+        .started_at
+        .or(Some(r.created_at))
+        .map(secs_to_ns)
+        .unwrap_or(1);
+
+    pb::ContainerStats {
+        attributes: Some(pb::ContainerAttributes {
+            id: r.container_id.clone(),
+            metadata: Some(container_metadata_from_domain(&r.metadata)),
+            labels: r.labels.clone(),
+            annotations: r.annotations.clone(),
+        }),
+        cpu: Some(pb::CpuUsage {
+            timestamp,
+            usage_core_nano_seconds: Some(pb::UInt64Value { value: 0 }),
+            usage_nano_cores: Some(pb::UInt64Value { value: 0 }),
+            psi: None,
+        }),
+        memory: Some(pb::MemoryUsage {
+            timestamp,
+            working_set_bytes: Some(pb::UInt64Value { value: 0 }),
+            available_bytes: Some(pb::UInt64Value { value: 0 }),
+            usage_bytes: Some(pb::UInt64Value { value: 0 }),
+            rss_bytes: Some(pb::UInt64Value { value: 0 }),
+            page_faults: Some(pb::UInt64Value { value: 0 }),
+            major_page_faults: Some(pb::UInt64Value { value: 0 }),
+            psi: None,
+        }),
+        writable_layer: Some(pb::FilesystemUsage {
+            timestamp,
+            fs_id: Some(pb::FilesystemIdentifier {
+                mountpoint: "/".into(),
+            }),
+            used_bytes: Some(pb::UInt64Value { value: 0 }),
+            inodes_used: Some(pb::UInt64Value { value: 0 }),
+        }),
+        swap: Some(pb::SwapUsage {
+            timestamp,
+            swap_available_bytes: Some(pb::UInt64Value { value: 0 }),
+            swap_usage_bytes: Some(pb::UInt64Value { value: 0 }),
+        }),
+        io: Some(pb::IoUsage {
+            timestamp,
+            psi: None,
+        }),
+    }
+}
+
+pub fn records_to_pod_sandbox_stats(
+    sandbox: &oas_types::SandboxRecord,
+    containers: Vec<oas_types::ContainerRecord>,
+) -> pb::PodSandboxStats {
+    let timestamp = secs_to_ns(sandbox.created_at).max(1);
+
+    pb::PodSandboxStats {
+        attributes: Some(pb::PodSandboxAttributes {
+            id: sandbox.sandbox_id.clone(),
+            metadata: Some(sandbox_metadata_from_domain(&sandbox.metadata)),
+            labels: sandbox.labels.clone(),
+            annotations: sandbox.annotations.clone(),
+        }),
+        linux: Some(pb::LinuxPodSandboxStats {
+            cpu: Some(pb::CpuUsage {
+                timestamp,
+                usage_core_nano_seconds: Some(pb::UInt64Value { value: 0 }),
+                usage_nano_cores: Some(pb::UInt64Value { value: 0 }),
+                psi: None,
+            }),
+            memory: Some(pb::MemoryUsage {
+                timestamp,
+                working_set_bytes: Some(pb::UInt64Value { value: 0 }),
+                available_bytes: Some(pb::UInt64Value { value: 0 }),
+                usage_bytes: Some(pb::UInt64Value { value: 0 }),
+                rss_bytes: Some(pb::UInt64Value { value: 0 }),
+                page_faults: Some(pb::UInt64Value { value: 0 }),
+                major_page_faults: Some(pb::UInt64Value { value: 0 }),
+                psi: None,
+            }),
+            network: Some(pb::NetworkUsage {
+                timestamp,
+                default_interface: Some(pb::NetworkInterfaceUsage {
+                    name: "eth0".into(),
+                    rx_bytes: Some(pb::UInt64Value { value: 0 }),
+                    rx_errors: Some(pb::UInt64Value { value: 0 }),
+                    tx_bytes: Some(pb::UInt64Value { value: 0 }),
+                    tx_errors: Some(pb::UInt64Value { value: 0 }),
+                }),
+                interfaces: Vec::new(),
+            }),
+            process: Some(pb::ProcessUsage {
+                timestamp,
+                process_count: Some(pb::UInt64Value { value: 0 }),
+            }),
+            containers: containers.iter().map(record_to_container_stats).collect(),
+            io: Some(pb::IoUsage {
+                timestamp,
+                psi: None,
+            }),
+        }),
+        windows: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -381,7 +490,7 @@ fn opt_string(s: &str) -> Option<String> {
 }
 
 /// 内部 record 以 Unix 秒存时间戳（§2.1），CRI proto 要求纳秒。emit 时换算。
-fn secs_to_ns(s: i64) -> i64 {
+pub fn secs_to_ns(s: i64) -> i64 {
     s.saturating_mul(1_000_000_000)
 }
 

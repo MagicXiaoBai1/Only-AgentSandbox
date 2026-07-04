@@ -7,7 +7,7 @@ use oas_cri::runtime::v1::image_service_server::ImageServiceServer;
 use oas_cri::runtime::v1::runtime_service_client::RuntimeServiceClient;
 use oas_cri::runtime::v1::runtime_service_server::RuntimeServiceServer;
 use oas_cri::runtime::v1::{
-    ImageFsInfoRequest, ListImagesRequest, PodSandboxConfig, PodSandboxMetadata,
+    ImageFsInfoRequest, ListContainerStatsRequest, ListImagesRequest, PodSandboxConfig, PodSandboxMetadata,
     RunPodSandboxRequest, StatusRequest, VersionRequest,
 };
 use oas_cri::{ImageSvc, RuntimeSvc};
@@ -95,7 +95,23 @@ async fn handshake_and_stub_short_circuit_over_uds() {
         .unwrap()
         .into_inner();
     assert!(!fs.image_filesystems.is_empty());
+    assert!(fs.image_filesystems[0].timestamp > 0);
+    assert_eq!(
+        fs.image_filesystems[0].fs_id.as_ref().unwrap().mountpoint,
+        "/"
+    );
 
+    assert!(fs.container_filesystems.is_empty());
+
+    // ListContainerStats: 空 store 下返回空列表，而不是 Unimplemented。
+    let stats = rt
+        .list_container_stats(ListContainerStatsRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(stats.stats.is_empty());
+    
     // RunPodSandbox（带合法 type 注解）→ stub 返回 UNAVAILABLE。
     let cfg = PodSandboxConfig {
         metadata: Some(PodSandboxMetadata {

@@ -98,21 +98,26 @@ impl ImageService for ImageSvc {
         req: Request<pb::ImageFsInfoRequest>,
     ) -> Result<Response<pb::ImageFsInfoResponse>, Status> {
         let req = req.into_inner();
+
         cri_call!("ImageFsInfo", &req, async move {
-            // 固定返回“磁盘很空”假值（used < capacity），避免触发误驱逐（§3.1）。
-            // mountpoint 必须是真实存在的路径，kubelet 会 statfs 取真实容量；用根fs
-            // 容量充足，不会触发 DiskPressure。
+            // mountpoint 必须是真实存在的路径，kubelet 会 statfs 取真实容量。
+            // 只声明 image filesystems；container_filesystems 为空，沿用 CRI 默认语义。
+            // 避免 kubelet 对同一个假容器文件系统做额外容量推断。
             let fs = pb::FilesystemUsage {
-                timestamp: 0,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+                    .unwrap_or(1),
                 fs_id: Some(pb::FilesystemIdentifier {
                     mountpoint: "/".into(),
                 }),
                 used_bytes: Some(pb::UInt64Value { value: 0 }),
                 inodes_used: Some(pb::UInt64Value { value: 0 }),
             };
+
             Ok(Response::new(pb::ImageFsInfoResponse {
-                image_filesystems: vec![fs.clone()],
-                container_filesystems: vec![fs],
+                image_filesystems: vec![fs],
+                container_filesystems: Vec::new(),
             }))
         })
     }

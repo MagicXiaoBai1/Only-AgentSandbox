@@ -194,6 +194,48 @@ async fn e2e_full_lifecycle() {
     assert_eq!(cs.state, ContainerState::ContainerRunning as i32);
     assert!(cs.started_at > 0);
 
+    // Stats RPCs are kubelet-observed read paths: return minimal stable stats
+    // instead of Unimplemented.
+    let cstats = c
+        .rt
+        .container_stats(ContainerStatsRequest {
+            container_id: cid.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .stats
+        .unwrap();
+    assert_eq!(cstats.attributes.unwrap().id, cid);
+    assert!(cstats.cpu.unwrap().timestamp > 0);
+
+    let listed_cstats = c
+        .rt
+        .list_container_stats(ListContainerStatsRequest {
+            filter: Some(ContainerStatsFilter {
+                pod_sandbox_id: sb_id.clone(),
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .stats;
+    assert_eq!(listed_cstats.len(), 1);
+
+    let pstats = c
+        .rt
+        .pod_sandbox_stats(PodSandboxStatsRequest {
+            pod_sandbox_id: sb_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .stats
+        .unwrap();
+    assert_eq!(pstats.attributes.unwrap().id, sb_id);
+    assert_eq!(pstats.linux.unwrap().containers.len(), 1);
+
     // StopContainer → EXITED, exit_code=0, reason=Completed
     c.rt
         .stop_container(StopContainerRequest {

@@ -329,7 +329,14 @@ impl RuntimeService for RuntimeSvc {
     ) -> Result<Response<pb::ContainerStatsResponse>, Status> {
         let req = req.into_inner();
         cri_call!("ContainerStats", &req, async move {
-            Err(unsupported::unimpl("ContainerStats"))
+            let rec = self
+                .mgr
+                .container_status(&req.container_id)
+                .await
+                .map_err(to_status)?;
+            Ok(Response::new(pb::ContainerStatsResponse {
+                stats: Some(convert::record_to_container_stats(&rec)),
+            }))
         })
     }
 
@@ -339,7 +346,20 @@ impl RuntimeService for RuntimeSvc {
     ) -> Result<Response<pb::ListContainerStatsResponse>, Status> {
         let req = req.into_inner();
         cri_call!("ListContainerStats", &req, async move {
-            Err(unsupported::unimpl("ListContainerStats"))
+            let filter = req.filter.as_ref().map(|f| pb::ContainerFilter {
+                id: f.id.clone(),
+                pod_sandbox_id: f.pod_sandbox_id.clone(),
+                state: None,
+                label_selector: f.label_selector.clone(),
+            });
+            let recs = self
+                .mgr
+                .list_containers(convert::container_filter(filter.as_ref()))
+                .await
+                .map_err(to_status)?;
+            Ok(Response::new(pb::ListContainerStatsResponse {
+                stats: recs.iter().map(convert::record_to_container_stats).collect(),
+            }))
         })
     }
 
@@ -349,7 +369,22 @@ impl RuntimeService for RuntimeSvc {
     ) -> Result<Response<pb::PodSandboxStatsResponse>, Status> {
         let req = req.into_inner();
         cri_call!("PodSandboxStats", &req, async move {
-            Err(unsupported::unimpl("PodSandboxStats"))
+            let sandbox = self
+                .mgr
+                .sandbox_status(&req.pod_sandbox_id)
+                .await
+                .map_err(to_status)?;
+            let containers = self
+                .mgr
+                .list_containers(oas_types::ContainerFilter {
+                    sandbox_id: Some(req.pod_sandbox_id),
+                    ..Default::default()
+                })
+                .await
+                .map_err(to_status)?;
+            Ok(Response::new(pb::PodSandboxStatsResponse {
+                stats: Some(convert::records_to_pod_sandbox_stats(&sandbox, containers)),
+            }))
         })
     }
 
@@ -359,7 +394,29 @@ impl RuntimeService for RuntimeSvc {
     ) -> Result<Response<pb::ListPodSandboxStatsResponse>, Status> {
         let req = req.into_inner();
         cri_call!("ListPodSandboxStats", &req, async move {
-            Err(unsupported::unimpl("ListPodSandboxStats"))
+            let filter = req.filter.as_ref().map(|f| pb::PodSandboxFilter {
+                id: f.id.clone(),
+                state: None,
+                label_selector: f.label_selector.clone(),
+            });
+            let sandboxes = self
+                .mgr
+                .list_sandboxes(convert::sandbox_filter(filter.as_ref()))
+                .await
+                .map_err(to_status)?;
+            let mut stats = Vec::with_capacity(sandboxes.len());
+            for sandbox in sandboxes {
+                let containers = self
+                    .mgr
+                    .list_containers(oas_types::ContainerFilter {
+                        sandbox_id: Some(sandbox.sandbox_id.clone()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(to_status)?;
+                stats.push(convert::records_to_pod_sandbox_stats(&sandbox, containers));
+            }
+            Ok(Response::new(pb::ListPodSandboxStatsResponse { stats }))
         })
     }
 
