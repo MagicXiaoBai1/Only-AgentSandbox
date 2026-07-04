@@ -1,8 +1,16 @@
-//! 编排层 → Firecracker 原语层 契约（§2.1 / §3.3）。
+//! 编排层 → Firecracker 原语层 契约（§2.1 / §3.3 / §2.8）。
 //!
-//! 4 原语：`create_vm` / `get_vm` / `delete_vm` / `list_vm`。
+//! VM 原语：`create_vm` / `get_vm` / `delete_vm` / `list_vm`。
+//! 容器原语：`create_container` / `start_container` / `stop_container` /
+//! `remove_container` / `get_container_status`。
+//!
 //! 回收边界：VM 进程由本层回收；netns / ext4 / IP 租约由编排层调网络、存储层回收，
 //! 职责不重叠。
+//!
+//! 容器原语是 VM 内外带外通信（vsock GuestAgent）的对外屏蔽点（§2.8）：不同 VMM
+//! 可能用不同通信方式，编排层只调本 trait，不感知 vsock / 串口 / 通道细节。
+//! **MVP 阶段容器原语为 no-op**（声明态事实源仍在 `oas-store`），真实 vsock 通道
+//! 与 GuestAgent 待 §2.8 落地——届时改动收敛在本层 impl 内，编排层与 CRI 零改动。
 
 use std::os::fd::RawFd;
 
@@ -55,6 +63,38 @@ pub enum DriverError {
     Other(String),
 }
 
+// ---------------------------------------------------------------------------
+// 容器原语类型（§2.8）——driver 本地类型，不依赖 oas-types，保持依赖方向不反转。
+// ---------------------------------------------------------------------------
+
+/// 待在 VM 内启动的容器进程规格（编排层 `CreateContainerRequest` 映射而来）。
+#[derive(Debug, Clone, Default)]
+pub struct ContainerSpec {
+    pub command: Vec<String>,
+    pub args: Vec<String>,
+    /// `KEY=VAL` 形式。
+    pub env: Vec<String>,
+    pub cwd: String,
+}
+
+/// driver 视角的容器运行态（用于 reconcile 对账声明态 vs 实际态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerRuntimeState {
+    Created,
+    Running,
+    Exited,
+}
+
+/// `get_container_status` 返回的实际态。pid / exit_code 在 MVP 无 vsock 时为 `None`。
+#[derive(Debug, Clone, Default)]
+pub struct ContainerRuntimeStatus {
+    pub state: Option<ContainerRuntimeState>,
+    pub pid: Option<u32>,
+    /// Unix 时间戳（秒）。
+    pub started_at: Option<i64>,
+    pub exit_code: Option<i32>,
+}
+
 /// 编排层 → Firecracker 原语层接口（§2.1）。
 ///
 /// `create_vm` 原子幂等：同 `(type_id, netns)` 已在建则返回旧 `VmId`；
@@ -77,4 +117,36 @@ pub trait FirecrackerDriver: Send + Sync {
     async fn delete_vm(&self, id: VmId) -> Result<(), DriverError>;
 
     async fn list_vm(&self) -> Result<Vec<VmStatus>, DriverError>;
+
+    // --- 容器原语（§2.8，VM 内外带外通信屏蔽点）---
+    // MVP 阶段为 no-op：真实 vsock 通道待落地，编排层声明态事实源仍在 store。
+
+    /// 在 `vm_id` 对应的 VM 内登记一个容器（MVP no-op）。
+    async fn create_container(
+        &self,
+        vm_id: VmId,
+        container_id: &str,
+        spec: ContainerSpec,
+    ) -> Result<(), DriverError>;
+
+    /// 在 VM 内启动已登记容器进程（MVP no-op）。
+    async fn start_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError>;
+
+    /// 在 VM 内停止容器进程（MVP no-op）。
+    async fn stop_container(
+        &self,
+        vm_id: VmId,
+        container_id: &str,
+        timeout_sec: i64,
+    ) -> Result<(), DriverError>;
+
+    /// 在 VM 内移除容器登记（MVP no-op）。
+    async fn remove_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError>;
+
+    /// 查 VM 内容器实际态，供编排层 reconcile 对账（MVP 返回缺省态）。
+    async fn get_container_status(
+        &self,
+        vm_id: VmId,
+        container_id: &str,
+    ) -> Result<ContainerRuntimeStatus, DriverError>;
 }

@@ -18,7 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use oas_driver::{DriverError, FirecrackerDriver, VmId, VmLifecycle, VmSpec, VmStatus};
+use oas_driver::{
+    ContainerRuntimeState, ContainerRuntimeStatus, ContainerSpec, DriverError, FirecrackerDriver,
+    VmId, VmLifecycle, VmSpec, VmStatus,
+};
 use oas_manager::{OasError, VmReadiness};
 use oas_net::{NetConfig, NetError, NetworkManager};
 use oas_storage::{DiskConfig, StorageError, StorageManager};
@@ -35,6 +38,13 @@ pub struct MockDriver {
     lists: Mutex<Vec<()>>,
     statuses: Mutex<HashMap<u64, VmStatus>>,
     next_vm_id: AtomicU64,
+    // 容器原语调用记录（§2.8）：MVP no-op，仅记调用 + 可注入实际态。
+    container_creates: Mutex<Vec<(u64, String)>>,
+    container_starts: Mutex<Vec<(u64, String)>>,
+    container_stops: Mutex<Vec<(u64, String)>>,
+    container_removes: Mutex<Vec<(u64, String)>>,
+    container_status_gets: Mutex<Vec<(u64, String)>>,
+    container_statuses: Mutex<HashMap<String, ContainerRuntimeStatus>>,
 }
 
 impl MockDriver {
@@ -47,6 +57,12 @@ impl MockDriver {
             lists: Mutex::new(Vec::new()),
             statuses: Mutex::new(HashMap::new()),
             next_vm_id: AtomicU64::new(1),
+            container_creates: Mutex::new(Vec::new()),
+            container_starts: Mutex::new(Vec::new()),
+            container_stops: Mutex::new(Vec::new()),
+            container_removes: Mutex::new(Vec::new()),
+            container_status_gets: Mutex::new(Vec::new()),
+            container_statuses: Mutex::new(HashMap::new()),
         }
     }
     pub fn fail_create(&self, v: bool) {
@@ -63,6 +79,28 @@ impl MockDriver {
     }
     pub fn list_count(&self) -> usize {
         self.lists.lock().unwrap().len()
+    }
+    pub fn create_container_count(&self) -> usize {
+        self.container_creates.lock().unwrap().len()
+    }
+    pub fn start_container_count(&self) -> usize {
+        self.container_starts.lock().unwrap().len()
+    }
+    pub fn stop_container_count(&self) -> usize {
+        self.container_stops.lock().unwrap().len()
+    }
+    pub fn remove_container_count(&self) -> usize {
+        self.container_removes.lock().unwrap().len()
+    }
+    pub fn get_container_status_count(&self) -> usize {
+        self.container_status_gets.lock().unwrap().len()
+    }
+    /// 注入 `get_container_status` 返回的实际态（key = container_id）。
+    pub fn set_container_status(&self, container_id: &str, status: ContainerRuntimeStatus) {
+        self.container_statuses
+            .lock()
+            .unwrap()
+            .insert(container_id.to_string(), status);
     }
 }
 
@@ -120,6 +158,71 @@ impl FirecrackerDriver for MockDriver {
     async fn list_vm(&self) -> Result<Vec<VmStatus>, DriverError> {
         self.lists.lock().unwrap().push(());
         Ok(self.statuses.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn create_container(
+        &self,
+        vm_id: VmId,
+        container_id: &str,
+        _spec: ContainerSpec,
+    ) -> Result<(), DriverError> {
+        self.container_creates
+            .lock()
+            .unwrap()
+            .push((vm_id.0, container_id.to_string()));
+        Ok(())
+    }
+
+    async fn start_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError> {
+        self.container_starts
+            .lock()
+            .unwrap()
+            .push((vm_id.0, container_id.to_string()));
+        Ok(())
+    }
+
+    async fn stop_container(
+        &self,
+        vm_id: VmId,
+        container_id: &str,
+        _timeout_sec: i64,
+    ) -> Result<(), DriverError> {
+        self.container_stops
+            .lock()
+            .unwrap()
+            .push((vm_id.0, container_id.to_string()));
+        Ok(())
+    }
+
+    async fn remove_container(&self, vm_id: VmId, container_id: &str) -> Result<(), DriverError> {
+        self.container_removes
+            .lock()
+            .unwrap()
+            .push((vm_id.0, container_id.to_string()));
+        Ok(())
+    }
+
+    async fn get_container_status(
+        &self,
+        vm_id: VmId,
+        container_id: &str,
+    ) -> Result<ContainerRuntimeStatus, DriverError> {
+        self.container_status_gets
+            .lock()
+            .unwrap()
+            .push((vm_id.0, container_id.to_string()));
+        Ok(self
+            .container_statuses
+            .lock()
+            .unwrap()
+            .get(container_id)
+            .cloned()
+            .unwrap_or(ContainerRuntimeStatus {
+                state: Some(ContainerRuntimeState::Created),
+                pid: None,
+                started_at: None,
+                exit_code: None,
+            }))
     }
 }
 

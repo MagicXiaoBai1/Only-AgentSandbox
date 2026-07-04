@@ -246,7 +246,7 @@ pub fn record_to_sandbox_status(r: &oas_types::SandboxRecord) -> pb::PodSandboxS
         id: r.sandbox_id.clone(),
         metadata: Some(sandbox_metadata_from_domain(&r.metadata)),
         state: sandbox_state(r.state),
-        created_at: r.created_at,
+        created_at: secs_to_ns(r.created_at),
         network: Some(pb::PodSandboxNetworkStatus {
             ip: r.pod_ip.clone(),
             additional_ips: Vec::new(),
@@ -263,7 +263,7 @@ pub fn record_to_sandbox(r: &oas_types::SandboxRecord) -> pb::PodSandbox {
         id: r.sandbox_id.clone(),
         metadata: Some(sandbox_metadata_from_domain(&r.metadata)),
         state: sandbox_state(r.state),
-        created_at: r.created_at,
+        created_at: secs_to_ns(r.created_at),
         labels: r.labels.clone(),
         annotations: r.annotations.clone(),
         runtime_handler: String::new(),
@@ -294,9 +294,9 @@ pub fn record_to_container_status(r: &oas_types::ContainerRecord) -> pb::Contain
         id: r.container_id.clone(),
         metadata: Some(container_metadata_from_domain(&r.metadata)),
         state: container_state(r.state),
-        created_at: r.created_at,
-        started_at: r.started_at.unwrap_or(0),
-        finished_at: r.finished_at.unwrap_or(0),
+        created_at: secs_to_ns(r.created_at),
+        started_at: r.started_at.map(secs_to_ns).unwrap_or(0),
+        finished_at: r.finished_at.map(secs_to_ns).unwrap_or(0),
         exit_code: r.exit_code,
         image: Some(image_spec(&r.image)),
         image_ref: r.image.clone(),
@@ -321,7 +321,7 @@ pub fn record_to_container(r: &oas_types::ContainerRecord) -> pb::Container {
         image: Some(image_spec(&r.image)),
         image_ref: r.image.clone(),
         state: container_state(r.state),
-        created_at: r.created_at,
+        created_at: secs_to_ns(r.created_at),
         labels: r.labels.clone(),
         annotations: r.annotations.clone(),
         image_id: r.image.clone(),
@@ -378,6 +378,11 @@ fn opt_string(s: &str) -> Option<String> {
     } else {
         Some(s.to_string())
     }
+}
+
+/// 内部 record 以 Unix 秒存时间戳（§2.1），CRI proto 要求纳秒。emit 时换算。
+fn secs_to_ns(s: i64) -> i64 {
+    s.saturating_mul(1_000_000_000)
 }
 
 #[cfg(test)]

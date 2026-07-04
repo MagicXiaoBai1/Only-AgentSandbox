@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f /run/oas.sock && OAS_SOCKET=/run/oas.sock ./target/debug/oas-runtime)",
+      "Bash(pkill -x kubelet)",
+      "Bash(pkill -x oas-runtime)",
+      "Bash(rm -rf tests/agent-rt-test/kubelet-root tests/agent-rt-test/static-pods/*.yaml tests/agent-rt-test/logs/*.log)",
+      "Bash(:)",
+      "Bash(cd /home/yunfei/Code/Only-AgentSandbox/only-agent-sandbox && rm -f /run/oas.sock && OAS_SOCKET=/run/oas.sock ./target/debug/oas-runtime)",
+      "Bash(crictl --runtime-endpoint unix:///run/oas.sock --timeout 10s ps -a)",
+      "Bash(cargo clippy *)"
+    ],
+    "additionalDirectories": [
+      "/run"
+    ]
+  }
+}

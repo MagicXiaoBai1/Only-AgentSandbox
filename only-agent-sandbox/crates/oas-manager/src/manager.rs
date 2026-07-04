@@ -1,12 +1,15 @@
 //! 真 `Manager` 实现（§3.2）：持 driver/net/storage/store + readiness + 类型表 + 锁 + 时钟。
 //!
-//! GuestAgent 本轮延后：`start_container` 仅置 RUNNING、`stop_container` 显式停止置 EXITED
-//! （exit_code=0/Completed，非「VM 还活着」反推，红线 2 保留）。
+//! 容器层经 driver 下沉（§2.8）：`create/start/stop/remove_container` 调 driver 对应原语，
+//! `container_status` 调 `driver.get_container_status` 做 reconcile 对账；声明态事实源仍在
+//! store。真实 vsock/GuestAgent 通道待 §2.8 落地，届时改动收敛在 driver impl 内。
+//! 红线 2 保留：`stop_container` 显式停止置 EXITED（exit_code=0/Completed，非「VM 还活着」反推）；
+//! 红线 3 保留：`list_containers` 永不调 driver。
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use oas_driver::{DriverError, FirecrackerDriver, VmId, VmLifecycle, VmSpec};
+use oas_driver::{ContainerSpec, DriverError, FirecrackerDriver, VmId, VmLifecycle, VmSpec};
 use oas_net::{NetConfig, NetError, NetworkManager};
 use oas_storage::{DiskConfig, StorageError, StorageManager};
 use oas_store::{Store, StoreError};
@@ -38,7 +41,7 @@ pub struct OasManager {
     clock: Arc<dyn Clock>,
     id_gen: IdGenerator,
     readiness: Arc<dyn VmReadiness>,
-    // TODO(§2.8): agent: Arc<dyn GuestAgent> + container 退出回灌。
+    // 容器原语经 driver 下沉（§2.8）：真实 vsock/GuestAgent 通道待落地，无需在 manager 持 agent。
     // TODO(§4.6): reconcile 后台 task。
 }
 
@@ -62,6 +65,12 @@ impl OasManager {
             id_gen: IdGenerator::new(),
             readiness,
         }
+    }
+
+    /// 取 sandbox 的 vm_id（容器原语下沉 driver 时定位 VM）。
+    fn vm_id_of(&self, sandbox_id: &str) -> Result<VmId, OasError> {
+        let sb = self.store.get_sandbox(sandbox_id).map_err(map_store_err)?;
+        Ok(VmId(sb.vm_id))
     }
 }
 
@@ -105,7 +114,7 @@ fn image_info(image: &str) -> ImageInfo {
         id: format!("sha256:{image}"),
         repo_tags: vec![image.to_string()],
         repo_digests: vec![],
-        size: 0,
+        size: 1_048_576, // 非 0：kubelet 校验 ImageStatus 要求 id≠"" 且 size>0
         username: String::new(),
         image_ref: image.to_string(),
         pinned: true,
@@ -333,7 +342,7 @@ impl Manager for OasManager {
         let ty = self.types.get(sb.type_id)?;
 
         // 镜像白名单（ImageNotInList → CRI not_found）。
-        if !ty.image_whitelist.iter().any(|w| w == &req.image) {
+        if !ty.image_allowed(&req.image) {
             return Err(OasError::ImageNotInList(req.image.clone()));
         }
         // 资源 vs type 预算（§9 一致性）。
@@ -354,6 +363,21 @@ impl Manager for OasManager {
                     ty.type_id
                 )));
             }
+        }
+
+        // 硬限制：单沙箱仅单容器（ADR）。已有未删除容器 → Conflict。
+        let existing = self
+            .store
+            .list_containers(&ContainerFilter {
+                sandbox_id: Some(req.pod_sandbox_id.clone()),
+                ..Default::default()
+            })
+            .map_err(map_store_err)?;
+        if !existing.is_empty() {
+            return Err(OasError::Conflict(format!(
+                "sandbox {} already has a container (single-container-per-sandbox)",
+                req.pod_sandbox_id
+            )));
         }
 
         let container_id = self.id_gen.container_id();
@@ -382,6 +406,25 @@ impl Manager for OasManager {
         self.store
             .transaction(Box::new(move |t| t.put_container(&rec_clone)))
             .map_err(map_store_err)?;
+
+        // 经 driver 下沉（§2.8）：在 VM 内登记容器。MVP no-op，失败回滚刚写入的记录。
+        let spec = ContainerSpec {
+            command: req.command.clone(),
+            args: req.args.clone(),
+            env: rec.env.clone(),
+            cwd: req.working_dir.clone(),
+        };
+        if let Err(e) = self
+            .driver
+            .create_container(VmId(sb.vm_id), &container_id, spec)
+            .await
+        {
+            let cid = container_id.clone();
+            let _ = self
+                .store
+                .transaction(Box::new(move |t| t.delete_container(&cid)));
+            return Err(map_driver_err(e));
+        }
         Ok(container_id)
     }
 
@@ -399,6 +442,12 @@ impl Manager for OasManager {
         match c.state {
             ContainerState::Running => Ok(()), // 幂等
             ContainerState::Created => {
+                let vm_id = self.vm_id_of(&c.sandbox_id)?;
+                // 经 driver 下沉（§2.8）：在 VM 内启动容器进程。MVP no-op。
+                self.driver
+                    .start_container(vm_id, container_id)
+                    .await
+                    .map_err(map_driver_err)?;
                 let mut c2 = c.clone();
                 c2.state = ContainerState::Running;
                 c2.started_at = Some(self.clock.now_unix_secs());
@@ -414,7 +463,7 @@ impl Manager for OasManager {
         }
     }
 
-    async fn stop_container(&self, container_id: &str, _timeout: i64) -> Result<(), OasError> {
+    async fn stop_container(&self, container_id: &str, timeout: i64) -> Result<(), OasError> {
         let sid = match self.store.get_container(container_id) {
             Ok(c) => c.sandbox_id,
             Err(StoreError::NotFound(_)) => return Ok(()), // 幂等
@@ -428,13 +477,22 @@ impl Manager for OasManager {
         if c.state == ContainerState::Exited {
             return Ok(()); // 幂等
         }
-        // agent 延后：显式停止置 EXITED（exit_code=0/Completed，非 VM-alive 反推）。
+        let vm_id = self.vm_id_of(&c.sandbox_id)?;
+        // 经 driver 下沉（§2.8）：在 VM 内停止容器进程。best-effort：失败不阻断置 EXITED
+        // （红线 2：显式停止，非 VM-alive 反推 exit_code）。
+        if let Err(e) = self
+            .driver
+            .stop_container(vm_id, container_id, timeout)
+            .await
+        {
+            tracing::warn!(target: "oas-manager", "driver stop_container failed (proceeding): {e}");
+        }
         let mut c2 = c.clone();
         c2.state = ContainerState::Exited;
         c2.finished_at = Some(self.clock.now_unix_secs());
         c2.exit_code = 0;
         c2.reason = Some(ContainerExitReason::Completed);
-        c2.message = "explicit stop (agent deferred)".into();
+        c2.message = "explicit stop".into();
         let cc = c2.clone();
         self.store
             .transaction(Box::new(move |t| t.put_container(&cc)))
@@ -449,6 +507,11 @@ impl Manager for OasManager {
             Err(e) => return Err(map_store_err(e)),
         };
         let _guard = self.locks.lock(&sid).await;
+        let vm_id = self.vm_id_of(&sid)?;
+        // 经 driver 下沉（§2.8）：在 VM 内移除容器登记。best-effort。
+        if let Err(e) = self.driver.remove_container(vm_id, container_id).await {
+            tracing::warn!(target: "oas-manager", "driver remove_container failed (proceeding): {e}");
+        }
         let cid = container_id.to_string();
         self.store
             .transaction(Box::new(move |t| t.delete_container(&cid)))
@@ -457,7 +520,24 @@ impl Manager for OasManager {
     }
 
     async fn container_status(&self, container_id: &str) -> Result<ContainerRecord, OasError> {
-        self.store.get_container(container_id).map_err(map_store_err)
+        let c = self
+            .store
+            .get_container(container_id)
+            .map_err(map_store_err)?;
+        // 经 driver 下沉（§2.8）：拉 VM 内实际态做 reconcile 对账。声明态事实源仍是 store，
+        // driver 实际态仅用于对账/补全 pid——MVP 不自动改 store 状态机（红线 2：不反推 exit_code）。
+        if let Ok(vm_id) = self.vm_id_of(&c.sandbox_id) {
+            if let Ok(rt) = self.driver.get_container_status(vm_id, container_id).await {
+                tracing::debug!(
+                    target: "oas-manager",
+                    container_id,
+                    declared_state = ?c.state,
+                    runtime_state = ?rt.state,
+                    "container_status reconcile",
+                );
+            }
+        }
+        Ok(c)
     }
 
     async fn list_containers(
@@ -468,7 +548,7 @@ impl Manager for OasManager {
     }
 
     async fn image_status(&self, image: &str) -> Result<Option<ImageInfo>, OasError> {
-        if self.types.all_images().iter().any(|w| *w == image) {
+        if self.types.image_allowed_any(image) {
             Ok(Some(image_info(image)))
         } else {
             Ok(None)
@@ -476,7 +556,7 @@ impl Manager for OasManager {
     }
 
     async fn pull_image(&self, image: &str) -> Result<String, OasError> {
-        if self.types.all_images().iter().any(|w| *w == image) {
+        if self.types.image_allowed_any(image) {
             Ok(image.to_string())
         } else {
             Err(OasError::ImageNotInList(image.to_string()))

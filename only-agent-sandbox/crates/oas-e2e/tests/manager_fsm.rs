@@ -340,29 +340,57 @@ async fn remove_container_idempotent() {
 #[tokio::test]
 async fn list_containers_by_sandbox() {
     let env = TestEnv::new();
+    // 单沙箱仅单容器（ADR 硬限制）：两个 sandbox 各放一个容器，验证按 sandbox 过滤。
+    let sid_a = run_sandbox_type0(&env).await;
+    let sid_b = env.mgr.run_sandbox(sandbox_req("uid2", 0)).await.unwrap();
+    let c1 = env
+        .mgr
+        .create_container(container_req(&sid_a, "img-a"))
+        .await
+        .unwrap();
+    let c2 = env
+        .mgr
+        .create_container(container_req(&sid_b, "img-a"))
+        .await
+        .unwrap();
+    let filter = oas_types::ContainerFilter {
+        sandbox_id: Some(sid_a.clone()),
+        ..Default::default()
+    };
+    let list = env.mgr.list_containers(filter).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(list.iter().any(|c| c.container_id == c1));
+    assert!(!list.iter().any(|c| c.container_id == c2));
+}
+
+#[tokio::test]
+async fn create_container_second_in_same_sandbox_conflicts() {
+    // ADR 硬限制：单沙箱仅单容器。已有未删除容器时再 create → Conflict。
+    let env = TestEnv::new();
     let sid = run_sandbox_type0(&env).await;
     let c1 = env
         .mgr
         .create_container(container_req(&sid, "img-a"))
         .await
         .unwrap();
-    let c2 = env
+    let err = env
+        .mgr
+        .create_container(container_req(&sid, "img-a"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OasError::Conflict(_)));
+    // 移除后允许重新创建。
+    env.mgr.remove_container(&c1).await.unwrap();
+    let _c2 = env
         .mgr
         .create_container(container_req(&sid, "img-a"))
         .await
         .unwrap();
-    let filter = oas_types::ContainerFilter {
-        sandbox_id: Some(sid.clone()),
-        ..Default::default()
-    };
-    let list = env.mgr.list_containers(filter).await.unwrap();
-    assert_eq!(list.len(), 2);
-    assert!(list.iter().any(|c| c.container_id == c1));
-    assert!(list.iter().any(|c| c.container_id == c2));
 }
 
 #[tokio::test]
-async fn container_status_never_calls_driver() {
+async fn container_ops_sink_to_driver() {
+    // 接缝验证：create/start/stop/remove/status 经 driver 下沉（§2.8）。
     let env = TestEnv::new();
     let sid = run_sandbox_type0(&env).await;
     let cid = env
@@ -370,9 +398,65 @@ async fn container_status_never_calls_driver() {
         .create_container(container_req(&sid, "img-a"))
         .await
         .unwrap();
+    assert_eq!(env.driver.create_container_count(), 1);
+    env.mgr.start_container(&cid).await.unwrap();
+    assert_eq!(env.driver.start_container_count(), 1);
     let _ = env.mgr.container_status(&cid).await;
-    let _ = env.mgr.list_containers(Default::default()).await;
-    assert_eq!(env.driver.get_count(), 0);
+    assert_eq!(env.driver.get_container_status_count(), 1);
+    env.mgr.stop_container(&cid, 5).await.unwrap();
+    assert_eq!(env.driver.stop_container_count(), 1);
+    env.mgr.remove_container(&cid).await.unwrap();
+    assert_eq!(env.driver.remove_container_count(), 1);
+}
+
+#[tokio::test]
+async fn list_containers_never_calls_driver() {
+    // 红线 ③（List 部分）：list_containers 永不调 driver。
+    let env = TestEnv::new();
+    let sid = run_sandbox_type0(&env).await;
+    let _ = env
+        .mgr
+        .create_container(container_req(&sid, "img-a"))
+        .await
+        .unwrap();
+    let before = env.driver.get_container_status_count();
+    let list = env.mgr.list_containers(Default::default()).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        env.driver.get_container_status_count(),
+        before,
+        "list_containers must not call driver.get_container_status"
+    );
+    assert_eq!(env.driver.get_count(), 0, "list must not call get_vm");
+}
+
+#[tokio::test]
+async fn container_status_does_not_infer_exit_code() {
+    // 红线 ②：stop 后 exit_code 来自显式停止（0/Completed），非 driver VM-alive 反推。
+    // 即便 driver 上报 Running 实际态，store 声明态仍为 Exited/0/Completed。
+    let env = TestEnv::new();
+    let sid = run_sandbox_type0(&env).await;
+    let cid = env
+        .mgr
+        .create_container(container_req(&sid, "img-a"))
+        .await
+        .unwrap();
+    env.mgr.start_container(&cid).await.unwrap();
+    // 注入 driver 误报 Running（模拟 VM 还活着），stop 仍应置 Exited/0/Completed。
+    env.driver.set_container_status(
+        &cid,
+        oas_driver::ContainerRuntimeStatus {
+            state: Some(oas_driver::ContainerRuntimeState::Running),
+            pid: Some(42),
+            started_at: Some(1_700_000_001),
+            exit_code: None,
+        },
+    );
+    env.mgr.stop_container(&cid, 5).await.unwrap();
+    let rec = env.mgr.container_status(&cid).await.unwrap();
+    assert_eq!(rec.state, ContainerState::Exited);
+    assert_eq!(rec.exit_code, 0);
+    assert_eq!(rec.reason, Some(ContainerExitReason::Completed));
 }
 
 // ===== image_* + version/status ===========================================

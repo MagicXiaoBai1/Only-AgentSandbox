@@ -87,10 +87,12 @@ impl ImageService for ImageSvc {
         _req: Request<pb::ImageFsInfoRequest>,
     ) -> Result<Response<pb::ImageFsInfoResponse>, Status> {
         // 固定返回“磁盘很空”假值（used < capacity），避免触发误驱逐（§3.1）。
+        // mountpoint 必须是真实存在的路径，kubelet 会 statfs 取真实容量；用根fs
+        // 容量充足，不会触发 DiskPressure。
         let fs = pb::FilesystemUsage {
             timestamp: 0,
             fs_id: Some(pb::FilesystemIdentifier {
-                mountpoint: "/var/lib/oas".into(),
+                mountpoint: "/".into(),
             }),
             used_bytes: Some(pb::UInt64Value { value: 0 }),
             inodes_used: Some(pb::UInt64Value { value: 0 }),

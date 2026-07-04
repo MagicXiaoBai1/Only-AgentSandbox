@@ -81,6 +81,38 @@ impl SandboxTypeTable {
             .flat_map(|t| t.image_whitelist.iter().map(String::as_str))
             .collect()
     }
+
+    /// 镜像是否被任一 type 的白名单允许（按 base name 匹配，兼容 kubelet
+    /// 把 `img-a` 规范化为 `docker.io/library/img-a:latest`）。
+    pub fn image_allowed_any(&self, image: &str) -> bool {
+        self.entries.iter().any(|t| t.image_allowed(image))
+    }
+}
+
+/// 取镜像引用的 base name：去 digest 算法前缀（`sha256:`）、去 registry/path、去 tag。
+/// `sha256:img-a:latest` → `img-a`；`docker.io/library/img-a:latest` → `img-a`；`img-a` → `img-a`。
+/// kubelet 可能把 `ImageStatus` 返回的 `id`（`sha256:…`）当作 CreateContainer 的 image 引用回传，
+/// 故须兼容剥离 `sha256:` 前缀。
+pub fn image_base_name(image: &str) -> &str {
+    let image = image
+        .strip_prefix("sha256:")
+        .or_else(|| image.strip_prefix("sha512:"))
+        .unwrap_or(image);
+    let after_slash = image.rsplit('/').next().unwrap_or(image);
+    match after_slash.rfind(':') {
+        Some(i) => &after_slash[..i],
+        None => after_slash,
+    }
+}
+
+impl SandboxType {
+    /// 镜像是否在本 type 的白名单内（按 base name 匹配）。
+    pub fn image_allowed(&self, image: &str) -> bool {
+        let base = image_base_name(image);
+        self.image_whitelist
+            .iter()
+            .any(|w| image_base_name(w) == base)
+    }
 }
 
 #[cfg(test)]

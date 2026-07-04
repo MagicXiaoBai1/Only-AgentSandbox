@@ -293,14 +293,16 @@ async fn e2e_list_pod_sandbox_after_run() {
 async fn e2e_list_containers_filter_by_sandbox() {
     let env = TestEnv::new();
     let mut c = setup(&env).await;
-    let sb_id = run_pod(&mut c.rt, "uid-1").await;
-    create_ct(&mut c.rt, &sb_id, "img-a").await;
-    create_ct(&mut c.rt, &sb_id, "img-a").await;
+    // 单沙箱仅单容器（ADR 硬限制）：用两个 sandbox 各放一个容器，验证按 sandbox 过滤。
+    let sb_a = run_pod(&mut c.rt, "uid-1").await;
+    let sb_b = run_pod(&mut c.rt, "uid-2").await;
+    create_ct(&mut c.rt, &sb_a, "img-a").await;
+    create_ct(&mut c.rt, &sb_b, "img-a").await;
     let containers = c
         .rt
         .list_containers(ListContainersRequest {
             filter: Some(ContainerFilter {
-                pod_sandbox_id: sb_id.clone(),
+                pod_sandbox_id: sb_a.clone(),
                 ..Default::default()
             }),
         })
@@ -308,8 +310,8 @@ async fn e2e_list_containers_filter_by_sandbox() {
         .unwrap()
         .into_inner()
         .containers;
-    assert_eq!(containers.len(), 2);
-    assert!(containers.iter().all(|c| c.pod_sandbox_id == sb_id));
+    assert_eq!(containers.len(), 1);
+    assert!(containers.iter().all(|c| c.pod_sandbox_id == sb_a));
 }
 
 #[tokio::test]
