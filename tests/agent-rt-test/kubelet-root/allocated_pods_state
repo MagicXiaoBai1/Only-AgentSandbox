@@ -1,0 +1,1 @@
+{"data":"{\"entries\":{\"da75b5576465e07acab59427580edc40\":{\"ContainerResources\":{\"workload\":{\"limits\":{\"cpu\":\"500m\",\"memory\":\"256Mi\"},\"requests\":{\"cpu\":\"500m\",\"memory\":\"128Mi\"}}},\"PodLevelResources\":null}}}","checksum":2922530359}

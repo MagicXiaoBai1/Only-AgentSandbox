@@ -126,7 +126,7 @@ kubelet 事件: Created container workload ✓ / Started container workload ✓
 cd only-agent-sandbox && cargo build --workspace
 
 # 2) 起运行时（mock 后端，UDS /run/oas.sock）
-OAS_SOCKET=/run/oas.sock ./target/debug/oas-runtime &
+OAS_LOG_FILE=/home/yunfei/Code/Only-AgentSandbox/tests/agent-rt-test/logs/oas.log OAS_SOCKET=/run/oas.sock ./target/debug/oas-runtime &
 
 # 3) 起 standalone kubelet（已避让端口 15250/15248）
 cd ../tests && bash start-kubelet.sh
@@ -136,7 +136,7 @@ cat > agent-rt-test/static-pods/oas-test.yaml <<'YAML'
 apiVersion: v1
 kind: Pod
 metadata:
-  name: oas-kubelet-test
+  name: oas-kubelet-test1
   namespace: default
   annotations:
     agent-sandbox/type: "0"
