@@ -1,6 +1,5 @@
 export LOGFILE=./firecracker.log
 
-# 这个要改为snap_double_shot所在的真实路径
 export ROOTROOT=/home/yunfei/workspace/snap_double_shot
 
 export FC=$ROOTROOT/bin/firecracker
@@ -24,5 +23,13 @@ export SOCK_B=$ROOT_B/run/firecracker.socket
 export DATA_A=$ROOTROOT/vm_resourse/data-a.ext4
 export DATA_B=$ROOTROOT/vm_resourse/data-b.ext4
 
-export SNAP_VSTATE=$ROOTA/snapshot/vestate
-export SNAP_BIOS=$ROOTA/snapshot/bsn
+export SNAP_VMSTATE=$ROOTROOT/snapshot/vmstate
+export SNAP_MEM=$ROOTROOT/snapshot/mem
+
+export TAP_DEV="tapH1"
+TAP_IP="172.16.0.1"
+MASK_SHORT="/30"
+export FC_MAC="06:00:AC:10:00:02"
+
+export NETNS_A_NAME="vmnsH"
+export NETNS_B_NAME="vmnsH2"

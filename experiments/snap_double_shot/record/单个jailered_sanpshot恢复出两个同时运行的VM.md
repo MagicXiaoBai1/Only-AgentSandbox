@@ -1,34 +1,14 @@
 以下为全章通用变量，实际执行前请按环境修改：
-source ../sh/env.sh
+
+进入 work_cwd 目录：
+1. 配置变量和网络命名空间
 ```bash
-export LOGFILE=./firecracker.log
-
-export FC=/home/yunfei/workspace/snap_double_shot/bin/firecracker
-export JAILER=/home/yunfei/workspace/snap_double_shot/bin/jailer
-export KERNEL=/home/yunfei/workspace/snap_double_shot/vm_resourse/vmlinux
-export ROOTFS=/home/yunfei/workspace/snap_double_shot/vm_resourse/rootfs.ext4
-
-export BASE=/home/yunfei/workspace/snap_double_shot/work_cwd
-export USB_FC=1234
-export SID_FC=1234
-
-export ID_A=vm-a
-export ID_B=vm-b
-
-export ROOT_A=$BASE/firecracker/$ID_A/root
-export ROOT_B=$BASE/firecracker/$ID_B/root
-
-export SOCK_A=$ROOT_A/run/firecracker.socket
-export SOCK_B=$ROOT_B/run/firecracker.socket
-
-export DATA_A=/home/yunfei/workspace/snap_double_shot/vm_resourse/data-a.ext4
-export DATA_B=/home/yunfei/workspace/snap_double_shot/vm_resourse/data-b.ext4
-
-export SNAP_VSTATE=$ROOTA/snapshot/vestate
-export SNAP_BIOS=$ROOTA/snapshot/bsn
+source ../sh/env.sh
+bash ../sh/0_setup_iptables_for_vm_a.sh
+bash ../sh/0_setup_iptables_for_vm_b.sh
 ```
 
-
+2. 准备vm a的启动文件
 ```bash
 sudo mkdir -p "$ROOT_A"
 
@@ -56,6 +36,8 @@ sudo "$JAILER" \
   --daemonize \
   -- --api-sock run/firecracker.socket
 
+sleep 0.5
+
 curl -X PUT --unix-socket "${SOCK_A}" \
     --data "{
         \"log_path\": \"${LOGFILE}\",
@@ -65,15 +47,16 @@ curl -X PUT --unix-socket "${SOCK_A}" \
     }" \
     "http://localhost/logger"
 
-KERNEL_BOOT_ARGS=" keep_bootcon console=ttyS0"
-
+sleep 0.5
 
 curl -X PUT --unix-socket "${SOCK_A}" \
     --data "{
         \"kernel_image_path\": \"./vmlinux\",
-        \"boot_args\": \"${KERNEL_BOOT_ARGS}\"
+        \"boot_args\": \"keep_bootcon console=ttyS0\"
     }" \
     "http://localhost/boot-source"
+
+sleep 0.5
 
 curl --unix-socket "${SOCK_A}" -i  \
   -X PUT 'http://localhost/machine-config' \
@@ -84,6 +67,8 @@ curl --unix-socket "${SOCK_A}" -i  \
            "mem_size_mib": 1024
   }'
 
+sleep 0.5
+
 curl -X PUT --unix-socket "${SOCK_A}" \
     --data "{
         \"drive_id\": \"rootfs\",
@@ -92,6 +77,8 @@ curl -X PUT --unix-socket "${SOCK_A}" \
         \"is_read_only\": true
     }" \
     "http://localhost/drives/rootfs"
+
+sleep 0.5
 
 curl --unix-socket "$SOCK_A" -i \
   -X PUT "http://localhost/drives/data" \
@@ -103,6 +90,8 @@ curl --unix-socket "$SOCK_A" -i \
     "is_read_only": false
   }'
 
+sleep 0.5
+
 curl --unix-socket "$SOCK_A" -i \
   -X PUT "http://localhost/actions" \
   -H "Content-Type: application/json" \
@@ -110,6 +99,7 @@ curl --unix-socket "$SOCK_A" -i \
     "action_type": "InstanceStart"
   }'
 
+sleep 0.5
 
 curl --unix-socket "$SOCK_A" -i \
   -X PATCH "http://localhost/vm" \
@@ -117,6 +107,8 @@ curl --unix-socket "$SOCK_A" -i \
   -d '{
     "state": "Paused"
   }'
+
+sleep 0.5
 
 curl --unix-socket "$SOCK_A" -i \
   -X PUT "http://localhost/snapshot/create" \
@@ -127,15 +119,12 @@ curl --unix-socket "$SOCK_A" -i \
     "mem_file_path": "/mem"
   }'
 
-ps aux | grep -i firecracker | grep -v grep
-kill -9 1337770
+# ps aux | grep -i firecracker | grep -v grep
+# kill -9 1337770
 
 ```
-
-
-### 启动 vm b
+### 准备 vm b 的文件
 ```bash
-### bash
 sudo mkdir -p "$ROOT_B"
 
 sudo cp --reflink=auto "$SNAP_VMSTATE" "$ROOT_B/vmstate.src"
@@ -154,7 +143,9 @@ sudo chmod 0400 "$ROOT_B/vmstate.src" "$ROOT_B/mem.src"
 sudo chmod 0400 "$ROOT_B/vmlinux" "$ROOT_B/rootfs.ext4"
 sudo chmod 0600 "$ROOT_B/data.ext4"
 ```
+### 启动 vm b
 
+```bash
 sudo "$JAILER" \
   --id "$ID_B" \
   --exec-file "$FC" \
@@ -177,3 +168,4 @@ curl --unix-socket "$SOCK_B" -i \
     "track_dirty_pages": false,
     "resume_vm": true
   }'
+```
