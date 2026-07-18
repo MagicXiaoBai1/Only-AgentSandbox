@@ -9,7 +9,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oas_driver::{ContainerSpec, DriverError, FirecrackerDriver, VmLifecycle, VmSpec};
+use oas_config::Config;
+use oas_driver::{ContainerSpec, DriverError, FirecrackerDriver, VmLifecycle, VmNet, VmSpec};
 use oas_net::{NetConfig, NetError, NetworkManager};
 use oas_storage::{DiskConfig, StorageError, StorageManager};
 use oas_store::{Store, StoreError};
@@ -20,8 +21,7 @@ use oas_types::{
 
 use crate::{
     Clock, CreateContainerRequest, CreateSandboxRequest, IdGenerator, ImageInfo, Manager,
-    OasError, PerKeyLock, RuntimeCondition, RuntimeStatusInfo, SandboxTypeTable, VersionInfo,
-    VmReadiness,
+    OasError, PerKeyLock, RuntimeCondition, RuntimeStatusInfo, VersionInfo, VmReadiness,
 };
 
 /// 就绪等待超时（真实 eventfd 实现用；假实现可忽略）。
@@ -36,7 +36,7 @@ pub struct OasManager {
     net: Arc<dyn NetworkManager>,
     storage: Arc<dyn StorageManager>,
     store: Arc<dyn Store>,
-    types: SandboxTypeTable,
+    cfg: Arc<Config>,
     locks: PerKeyLock,
     clock: Arc<dyn Clock>,
     id_gen: IdGenerator,
@@ -51,18 +51,21 @@ impl OasManager {
         net: Arc<dyn NetworkManager>,
         storage: Arc<dyn StorageManager>,
         store: Arc<dyn Store>,
+        cfg: Arc<Config>,
         readiness: Arc<dyn VmReadiness>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        // IdGenerator 从 store 已有 sandbox_id seed，避免 runtime 重启后 id 碰撞。
+        let id_gen = IdGenerator::seeded_from(&*store);
         Self {
             driver,
             net,
             storage,
             store,
-            types: SandboxTypeTable::default(),
+            cfg,
             locks: PerKeyLock::new(),
             clock,
-            id_gen: IdGenerator::new(),
+            id_gen,
             readiness,
         }
     }
@@ -185,7 +188,9 @@ impl Manager for OasManager {
             )));
         }
 
-        let ty = self.types.get(req.type_id)?;
+        let ty = self.cfg.get_type(req.type_id).ok_or_else(|| {
+            OasError::InvalidArgument(format!("unknown type_id: {}", req.type_id))
+        })?;
         // 云盘一致性。
         if ty.has_cloud_disk && req.cloud_disk_ref.is_none() {
             return Err(OasError::InvalidArgument(format!(
@@ -221,14 +226,18 @@ impl Manager for OasManager {
             }
         };
 
-        // driver.create_vm（event_fd 本轮传哨兵 -1，假实现忽略；真实 eventfd 随 driver 专题）。
+        // driver.create_vm：同步 spawn shim 并 Create 到 Running/Failed（re-attach 或全量 restore）。
         let spec = VmSpec {
             rw_layer_path: disk.rw_layer_path.clone(),
             cloud_disk_dev: disk.cloud_disk_dev.clone(),
         };
+        let net = VmNet {
+            netns_path: net_cfg.netns_path.clone(),
+            tap_name: net_cfg.tap_name.clone(),
+        };
         if let Err(e) = self
             .driver
-            .create_vm(&sandbox_id, &net_cfg.netns_path, req.type_id, spec, -1)
+            .create_vm(&sandbox_id, &net, req.type_id, spec)
             .await
         {
             let oe = map_driver_err(e);
@@ -333,7 +342,9 @@ impl Manager for OasManager {
             .store
             .get_sandbox(&req.pod_sandbox_id)
             .map_err(map_store_err)?;
-        let ty = self.types.get(sb.type_id)?;
+        let ty = self.cfg.get_type(sb.type_id).ok_or_else(|| {
+            OasError::Internal(format!("unknown type_id: {}", sb.type_id))
+        })?;
 
         // 镜像白名单（ImageNotInList → CRI not_found）。
         if !ty.image_allowed(&req.image) {
@@ -542,7 +553,7 @@ impl Manager for OasManager {
     }
 
     async fn image_status(&self, image: &str) -> Result<Option<ImageInfo>, OasError> {
-        if self.types.image_allowed_any(image) {
+        if self.cfg.image_allowed_any(image) {
             Ok(Some(image_info(image)))
         } else {
             Ok(None)
@@ -550,7 +561,7 @@ impl Manager for OasManager {
     }
 
     async fn pull_image(&self, image: &str) -> Result<String, OasError> {
-        if self.types.image_allowed_any(image) {
+        if self.cfg.image_allowed_any(image) {
             Ok(image.to_string())
         } else {
             Err(OasError::ImageNotInList(image.to_string()))
@@ -558,9 +569,7 @@ impl Manager for OasManager {
     }
 
     async fn list_images(&self) -> Result<Vec<ImageInfo>, OasError> {
-        Ok(self
-            .types
-            .all_images()
+        Ok(self.cfg.all_images()
             .into_iter()
             .map(image_info)
             .collect())

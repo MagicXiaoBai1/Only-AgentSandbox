@@ -26,6 +26,25 @@ impl IdGenerator {
         Self::default()
     }
 
+    /// 从 store 已有 sandbox_id seed：解析 `sb-<hex>` 取最大序号 +1。
+    /// 避免 runtime 重启后 IdGenerator 从 1 重新发、撞上已存在沙箱。
+    pub fn seeded_from(store: &dyn oas_store::Store) -> Self {
+        let mut max = 0u64;
+        if let Ok(recs) = store.list_sandboxes(&oas_types::SandboxFilter::default()) {
+            for r in recs {
+                if let Some(hex) = r.sandbox_id.strip_prefix("sb-") {
+                    if let Ok(n) = u64::from_str_radix(hex, 16) {
+                        max = max.max(n);
+                    }
+                }
+            }
+        }
+        Self {
+            sb: AtomicU64::new(max + 1),
+            ct: AtomicU64::new(1),
+        }
+    }
+
     pub fn sandbox_id(&self) -> SandboxId {
         let n = self.sb.fetch_add(1, Ordering::Relaxed);
         SandboxId(format!("sb-{n:016x}"))

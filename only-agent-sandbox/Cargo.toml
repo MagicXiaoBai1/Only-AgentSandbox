@@ -11,6 +11,10 @@ async-stream = { workspace = true }
 oas-cri = { path = "crates/oas-cri" }
 oas-manager = { path = "crates/oas-manager" }
 oas-store = { path = "crates/oas-store" }
+oas-config = { path = "crates/oas-config" }
+oas-driver = { path = "crates/oas-driver" }
+oas-net = { path = "crates/oas-net" }
+oas-storage = { path = "crates/oas-storage" }
 oas-mock = { path = "crates/oas-mock" }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log"] }

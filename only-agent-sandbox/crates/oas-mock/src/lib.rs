@@ -114,10 +114,9 @@ impl FirecrackerDriver for MockDriver {
     async fn create_vm(
         &self,
         id: &SandboxId,
-        netns_path: &str,
+        net: &oas_driver::VmNet,
         type_id: u8,
         _spec: VmSpec,
-        _event_fd: std::os::fd::RawFd,
     ) -> Result<(), DriverError> {
         if self.fail_create.load(Ordering::Relaxed) {
             return Err(DriverError::Other("injected create_vm failure".into()));
@@ -126,7 +125,7 @@ impl FirecrackerDriver for MockDriver {
         self.creates
             .lock()
             .unwrap()
-            .push((netns_path.to_string(), type_id));
+            .push((net.netns_path.to_string(), type_id));
         self.statuses.lock().unwrap().insert(
             key.clone(),
             VmStatus {

@@ -37,3 +37,6 @@ pub trait StorageManager: Send + Sync {
 
     async fn cleanup(&self, disk: &DiskConfig) -> Result<(), StorageError>;
 }
+
+pub mod real;
+pub use real::RealStorageManager;

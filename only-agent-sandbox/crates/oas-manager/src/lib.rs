@@ -21,14 +21,12 @@ pub mod id;
 pub mod lock;
 pub mod manager;
 pub mod readiness;
-pub mod types_table;
 
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use id::IdGenerator;
 pub use lock::PerKeyLock;
 pub use manager::OasManager;
 pub use readiness::VmReadiness;
-pub use types_table::{SandboxType, SandboxTypeTable};
 
 // ---------------------------------------------------------------------------
 // 统一领域错误

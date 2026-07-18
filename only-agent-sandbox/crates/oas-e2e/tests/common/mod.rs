@@ -34,11 +34,13 @@ impl TestEnv {
         let net = Arc::new(MockNet::new(store.clone(), "10.244.0.0/24", "10.244.0.254"));
         let storage = Arc::new(MockStorage::new());
         let clock = Arc::new(FakeClock::new(1_700_000_000));
+        let cfg = Arc::new(oas_config::Config::default());
         let mgr = Arc::new(OasManager::new(
             driver.clone(),
             net.clone(),
             storage.clone(),
             store.clone(),
+            cfg,
             readiness,
             clock.clone(),
         ));

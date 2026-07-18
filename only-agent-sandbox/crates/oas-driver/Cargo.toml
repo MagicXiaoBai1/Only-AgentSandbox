@@ -6,4 +6,15 @@ edition = "2024"
 [dependencies]
 async-trait.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+tracing = { version = "0.1", features = ["log"] }
+ttrpc = "0.9"
+protobuf = "3"
+nix = { version = "0.29", features = ["process", "signal", "user", "fs"] }
 oas-types = { path = "../oas-types" }
+oas-config = { path = "../oas-config" }
+
+[build-dependencies]
+ttrpc-codegen = "0.6"

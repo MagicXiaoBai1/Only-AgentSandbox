@@ -6,4 +6,8 @@ edition = "2024"
 [dependencies]
 async-trait.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true }
+tracing = { version = "0.1", features = ["log"] }
 oas-types = { path = "../oas-types" }
+oas-config = { path = "../oas-config" }
+oas-store = { path = "../oas-store" }

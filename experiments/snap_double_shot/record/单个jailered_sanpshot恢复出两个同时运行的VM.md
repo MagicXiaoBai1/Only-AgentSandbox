@@ -4,11 +4,7 @@
 1. 配置变量和网络命名空间
 ```bash
 source ../sh/env.sh
-bash ../sh/0_setup_iptables_for_vm_a.sh
-bash ../sh/0_setup_iptables_for_vm_b.sh
-```
 
-2. 准备vm a的启动文件
 ```bash
 sudo mkdir -p "$ROOT_A"
 
@@ -16,9 +12,9 @@ sudo cp --reflink=auto "$KERNEL" "$ROOT_A/vmlinux"
 sudo cp --reflink=auto "$ROOTFS" "$ROOT_A/rootfs.ext4"
 sudo cp --reflink=auto "$DATA_A" "$ROOT_A/data.ext4"
 
-sudo chmod 0700 "$ROOT_A"
-sudo chmod 0400 "$ROOT_A/vmlinux" "$ROOT_A/rootfs.ext4"
-sudo chmod 0600 "$ROOT_A/data.ext4"
+sudo chmod 0777 "$ROOT_A"
+sudo chmod 0444 "$ROOT_A/vmlinux" "$ROOT_A/rootfs.ext4"
+sudo chmod 0666 "$ROOT_A/data.ext4"
 
 sudo ls -l "$ROOT_A"
 ```
@@ -34,6 +30,7 @@ sudo "$JAILER" \
   --chroot-base-dir "$BASE" \
   --new-pid-ns \
   --daemonize \
+  --netns /var/run/netns/vmnsH \
   -- --api-sock run/firecracker.socket
 
 sleep 0.5
@@ -92,6 +89,15 @@ curl --unix-socket "$SOCK_A" -i \
 
 sleep 0.5
 
+curl -X PUT --unix-socket "${SOCK_A}" \
+    --data "{
+        \"iface_id\": \"net1\",
+        \"guest_mac\": \"$FC_MAC\",
+        \"host_dev_name\": \"$TAP_DEV\"
+    }" \
+    "http://localhost/network-interfaces/net1"
+
+sleep 0.5
 curl --unix-socket "$SOCK_A" -i \
   -X PUT "http://localhost/actions" \
   -H "Content-Type: application/json" \
@@ -123,8 +129,11 @@ curl --unix-socket "$SOCK_A" -i \
 # kill -9 1337770
 
 ```
-### 准备 vm b 的文件
+
+
+### 启动 vm b
 ```bash
+### bash
 sudo mkdir -p "$ROOT_B"
 
 sudo cp --reflink=auto "$SNAP_VMSTATE" "$ROOT_B/vmstate.src"
@@ -138,10 +147,10 @@ sudo cp --reflink=auto "$ROOTFS" "$ROOT_B/rootfs.ext4"
 sudo cp --reflink=auto "$DATA_B" "$ROOT_B/data.ext4"
 
 sudo chown -R "$UID_FC:$GID_FC" "$ROOT_B/"
-sudo chmod 0700 "$ROOT_B/"
-sudo chmod 0400 "$ROOT_B/vmstate.src" "$ROOT_B/mem.src"
-sudo chmod 0400 "$ROOT_B/vmlinux" "$ROOT_B/rootfs.ext4"
-sudo chmod 0600 "$ROOT_B/data.ext4"
+sudo chmod 0777 "$ROOT_B/"
+sudo chmod 0444 "$ROOT_B/vmstate.src" "$ROOT_B/mem.src"
+sudo chmod 0444 "$ROOT_B/vmlinux" "$ROOT_B/rootfs.ext4"
+sudo chmod 0666 "$ROOT_B/data.ext4"
 ```
 ### 启动 vm b
 
@@ -154,7 +163,17 @@ sudo "$JAILER" \
   --chroot-base-dir "$BASE" \
   --new-pid-ns \
   --daemonize \
+  --netns /var/run/netns/vmnsH2 \
   -- --api-sock run/firecracker.socket
+
+curl -X PUT --unix-socket "${SOCK_B}" \
+    --data "{
+        \"log_path\": \"${LOGFILE}\",
+        \"level\": \"Debug\",
+        \"show_level\": true,
+        \"show_log_origin\": true
+    }" \
+    "http://localhost/logger"
 
 curl --unix-socket "$SOCK_B" -i \
   -X PUT "http://localhost/snapshot/load" \
@@ -168,4 +187,3 @@ curl --unix-socket "$SOCK_B" -i \
     "track_dirty_pages": false,
     "resume_vm": true
   }'
-```

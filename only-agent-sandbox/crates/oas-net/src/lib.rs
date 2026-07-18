@@ -37,3 +37,6 @@ pub trait NetworkManager: Send + Sync {
 
     async fn teardown(&self, net: &NetConfig) -> Result<(), NetError>;
 }
+
+pub mod real;
+pub use real::NetManager;

@@ -1,22 +1,27 @@
-//! oas-runtime 装配：依赖注入唯一现场（§3.8）。
+//! oas-runtime 装配：依赖注入唯一现场（§3.8）+ shim 子命令分发。
 //!
-//! 当前用 **mock 后端**（`oas_mock` 的 driver/net/storage + `MemoryStore`）装配真 `OasManager`，
-//! 让 CRI/Manager/Store 三层在协议层跑通，可对接真 kubelet/crictl 做沙箱级联调。
+//! 单二进制两模式：
+//! - `oas-runtime`（无子命令）→ runtime 模式：serve CRI，装配 RedbStore + RealDriver +
+//!   真 net/storage + OasManager。runtime 重启不影响已存在的 shim（shim 经 setsid 脱离）。
+//! - `oas-runtime shim --config <p> --sandbox-id <id> --socket <uds> --log-file <f>` → shim 模式：
+//!   单 VM 守护进程，ttrpc server 等 Create 触发恢复。
 //!
-//! ⚠️ mock 后端不起任何 firecracker 进程、不建 netns/tap、不制备 ext4——沙箱在 CRI 层
-//! 显示 READY 但宿主机无真实 VM。真实 `FirecrackerDriver`/`NetworkManager`/`StorageManager`
-//! 及 `RedbStore` 就绪后，把这里的构造换成真实现即可（仅本文件改动）。
+//! 依赖方向见各 crate。本文件只做装配 + 模式分发，不含业务逻辑。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use oas_config::Config;
 use oas_cri::runtime::v1::image_service_server::ImageServiceServer;
 use oas_cri::runtime::v1::runtime_service_server::RuntimeServiceServer;
 use oas_cri::{ImageSvc, RuntimeSvc};
+use oas_driver::{shim::ShimArgs, RealDriver};
 use oas_manager::{Clock, Manager, OasManager, SystemClock, VmReadiness};
-use oas_mock::{ImmediateReadiness, MockDriver, MockNet, MockStorage};
-use oas_store::{MemoryStore, Store};
+use oas_mock::ImmediateReadiness;
+use oas_net::NetManager;
+use oas_storage::RealStorageManager;
+use oas_store::{RedbStore, Store};
 use tonic::transport::Server;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
@@ -28,41 +33,51 @@ use tracing_subscriber::EnvFilter;
 
 /// oas-runtime 启动参数。
 #[derive(Parser, Debug)]
-#[command(version, about = "Only AgentSandbox CRI runtime")]
+#[command(version, about = "Only AgentSandbox CRI runtime + shim")]
 struct Cli {
-    /// 日志文件路径；未指定则不写文件，仅输出到 stderr。
+    /// 子命令：`shim` 进入 shim 模式；缺省为 runtime 模式。
+    #[command(subcommand)]
+    mode: Option<Mode>,
+
+    /// 配置文件路径（runtime 与 shim 共用同一份；runtime 透传给 spawn 的 shim）。
+    #[arg(long, env = "OAS_CONFIG", default_value = "/etc/oas/config.toml", global = true)]
+    config: PathBuf,
+    /// 日志文件路径（runtime 模式）。
     #[arg(long, env = "OAS_LOG_FILE")]
     log_file: Option<PathBuf>,
-    /// 日志级别：debug|info|warn|error，默认 info（RUST_LOG 优先于本参数）。
+    /// 日志级别：debug|info|warn|error，默认 info（RUST_LOG 优先）。
     #[arg(long, env = "OAS_LOG_LEVEL", default_value = "info")]
     log_level: String,
 }
 
-/// 初始化分层日志。
-///
-/// - 文件层（`log_file` 存在时）：按 `log_level` 写全量，非阻塞，返回的 guard 必须由调用方
-///   持有至程序退出，以保证落盘 flush。
-/// - stderr 层：固定 WARN 及以上。
-///
-/// `RUST_LOG` 若设置则作为文件层的 EnvFilter（高级 per-module 过滤），否则按 `log_level`
-/// 构造默认指令并让 h2/hyper/tonic 等依赖保持 warn。
-fn init_logging(log_file: Option<&std::path::Path>, log_level: &str) -> Option<WorkerGuard> {
-    // tracing-subscriber 启用 tracing-log feature 后，init() 会自动调用 LogTracer::init()，
-    // 把 log crate 事件（h2/hyper/tonic）桥接到本订阅器，无需手动再调。
+#[derive(Subcommand, Debug)]
+enum Mode {
+    /// shim 模式：单沙箱守护进程，ttrpc server 等 Create 触发 firecracker snapshot 恢复。
+    Shim {
+        /// 沙箱句柄（兼作 jailer --id）。
+        #[arg(long)]
+        sandbox_id: String,
+        /// shim ttrpc UDS 路径（runtime 指定）。
+        #[arg(long)]
+        socket: PathBuf,
+        /// shim 日志文件。
+        #[arg(long)]
+        log_file: PathBuf,
+    },
+}
 
+/// 初始化分层日志（runtime 模式）。
+fn init_logging(log_file: Option<&std::path::Path>, log_level: &str) -> Option<WorkerGuard> {
     let file_filter = match std::env::var("RUST_LOG") {
         Ok(v) if !v.is_empty() => EnvFilter::builder().parse_lossy(v),
         _ => EnvFilter::builder()
             .parse_lossy(format!("h2=warn,hyper=warn,tonic=warn,tokio_util=warn,{log_level}")),
     };
-
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(LevelFilter::WARN);
-
     let registry = tracing_subscriber::registry().with(stderr_layer);
-
-    let guard = if let Some(path) = log_file {
+    if let Some(path) = log_file {
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -74,8 +89,6 @@ fn init_logging(log_file: Option<&std::path::Path>, log_level: &str) -> Option<W
                     .with_writer(writer)
                     .with_ansi(false)
                     .with_filter(file_filter);
-                // 这里需要先把 file_layer 装进去再返回 guard；用 once cell 风格不便，
-                // 故直接在分支内完成 init 并返回 guard。
                 registry.with(file_layer).init();
                 Some(guard)
             }
@@ -88,25 +101,68 @@ fn init_logging(log_file: Option<&std::path::Path>, log_level: &str) -> Option<W
     } else {
         registry.init();
         None
-    };
+    }
+}
 
-    guard
+/// shim 模式日志：写指定 log_file，stderr 兜底 WARN+。
+fn init_shim_logging(log_file: &std::path::Path) -> Option<WorkerGuard> {
+    let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(LevelFilter::WARN);
+    let registry = tracing_subscriber::registry().with(stderr_layer);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+    {
+        Ok(file) => {
+            let (writer, guard) = tracing_appender::non_blocking(file);
+            let file_layer = fmt::layer().with_writer(writer).with_ansi(false);
+            registry.with(file_layer).init();
+            Some(guard)
+        }
+        Err(_) => {
+            registry.init();
+            None
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    match cli.mode {
+        // ---- shim 模式 ----
+        Some(Mode::Shim {
+            sandbox_id,
+            socket,
+            log_file,
+        }) => {
+            let _guard = init_shim_logging(&log_file);
+            let args = ShimArgs {
+                config_path: cli.config,
+                sandbox_id,
+                socket,
+                log_file,
+            };
+            oas_driver::shim::run(args)?;
+            return Ok(());
+        }
+        // ---- runtime 模式 ----
+        None => {}
+    }
+
     let _log_guard = init_logging(cli.log_file.as_deref(), &cli.log_level);
 
-    // ---- 依赖注入：mock 后端 + 真 Manager + 真 Store ----
-    let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
-    let driver = Arc::new(MockDriver::new());
-    let net = Arc::new(MockNet::new(
-        store.clone(),
-        "10.244.0.0/24",
-        "10.244.0.254",
-    ));
-    let storage = Arc::new(MockStorage::new());
+    // ---- 依赖注入：真后端 + 真 Manager + 持久化 Store ----
+    let cfg = Arc::new(Config::load(&cli.config));
+    let store: Arc<dyn Store> = Arc::new(RedbStore::open(
+        cfg.store_path.to_str().ok_or("store_path not utf-8")?,
+    )?);
+    let driver = Arc::new(RealDriver::new(cli.config.clone()));
+    let net = Arc::new(NetManager::new(store.clone(), cfg.clone()));
+    let storage = Arc::new(RealStorageManager::new(cfg.clone()));
     let readiness: Arc<dyn VmReadiness> = Arc::new(ImmediateReadiness);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 
@@ -115,6 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         net,
         storage,
         store,
+        cfg,
         readiness,
         clock,
     ));
@@ -124,9 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = std::env::var("OAS_SOCKET").unwrap_or_else(|_| "/run/oas.sock".into());
     let _ = std::fs::remove_file(&socket);
     let uds = tokio::net::UnixListener::bind(&socket)?;
-    eprintln!(
-        "oas-runtime serving CRI on unix:{socket} (MOCK backend: no real firecracker/netns/ext4)"
-    );
+    eprintln!("oas-runtime serving CRI on unix:{socket}");
 
     let incoming = async_stream::stream! {
         loop {
