@@ -30,9 +30,24 @@ impl FirecrackerClient {
             len = body.len()
         );
         s.write_all(req.as_bytes())?;
-        let mut resp = Vec::with_capacity(512);
-        s.read_to_end(&mut resp)?;
-        let resp = String::from_utf8_lossy(&resp);
+        // firecracker 用 HTTP/1.1 keep-alive，响应后不关连接——read_to_end 会一直阻塞到
+        // read_timeout 然后返回 EAGAIN（即此前 "Resource temporarily unavailable" 的根因）。
+        // 每个请求独立连接，只需读到响应头结束（\r\n\r\n）即可解析状态码，无需消费 body。
+        let mut buf = Vec::with_capacity(256);
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = s.read(&mut chunk)?;
+            if n == 0 {
+                return Err(DriverError::FirecrackerApi(
+                    "firecracker closed connection before sending response headers".into(),
+                ));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let resp = String::from_utf8_lossy(&buf);
         // 状态行：`HTTP/1.1 204 No Content`
         let status_line = resp.lines().next().unwrap_or("");
         let code = status_line

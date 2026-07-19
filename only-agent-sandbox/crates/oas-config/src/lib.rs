@@ -87,9 +87,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            firecracker_bin: PathBuf::from("/usr/bin/firecracker"),
-            jailer_bin: PathBuf::from("/usr/bin/jailer"),
-            chroot_base_dir: PathBuf::from("/var/lib/oas/jail"),
+            firecracker_bin: PathBuf::from("/home/yunfei/workspace/snap_double_shot/bin/firecracker"),
+            jailer_bin: PathBuf::from("/home/yunfei/workspace/snap_double_shot/bin/jailer"),
+            chroot_base_dir: PathBuf::from("/home/yunfei/Code/Only-AgentSandbox/tmp/oas-test"),
             jailer_uid: 1234,
             jailer_gid: 1234,
             artifacts_dir: PathBuf::from("/var/lib/oas/artifacts"),

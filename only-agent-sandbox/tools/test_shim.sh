@@ -2,10 +2,10 @@
 # Shim 单独测试：绕过 runtime，直接驱动 shim 二进制完成一次 snapshot 恢复 + 验证。
 #
 # 前置：bundle 已烘焙（`tools/bake_bundle.sh <bundle>`），产物在
-#   $ARTIFACTS/snapshots/<bundle>/{vmlinux,rootfs.ext4,vmstate,mem}（含 virtio-net net1→tap0）。
+#   $ARTIFACTS/snapshots/<bundle>/{vmlinux,rootfs.ext4,vmstate,mem}（含 virtio-net net1→tapH0）。
 #
 # 流程：
-#   1. 建 netns `oas-<sid>` + tap0 + 网关 IP（镜像 oas-net::setup）
+#   1. 建 netns `oas-<sid>` + tapH0 + 网关 IP（镜像 oas-net::setup）
 #   2. 制备 per-VM rw ext4（镜像 oas-storage::provision）
 #   3. 后台起 shim：`oas-runtime shim --config ... --sandbox-id <sid> --socket <uds> --log-file <f>`
 #   4. 等 shim socket → `shim_smoke create` 触发恢复
@@ -22,13 +22,13 @@ KEEP="${TEST_KEEP:-0}"
 
 # 路径（与 oas-config::Config::default() 一致；可由环境覆盖）
 ARTIFACTS="${ARTIFACTS:-/var/lib/oas/artifacts}"
-CHROOT_BASE="${CHROOT_BASE:-/var/lib/oas/jail}"
+CHROOT_BASE="${CHROOT_BASE:-/home/yunfei/Code/Only-AgentSandbox/tmp/oas-test}"
 RW_BASE="${RW_BASE:-/var/lib/oas/rw}"
 RUN_BASE="${RUN_BASE:-/run/oas}"
 LOG_DIR="${LOG_DIR:-/var/log/oas}"
 CFG="${CFG:-/etc/oas/config.toml}"   # 不存在 → shim Config::load 回落 Default
 GUEST_IP="${GUEST_IP:-172.16.0.2}"
-TAP="${TAP:-tap0}"
+TAP="${TAP:-tapH0}"
 GATEWAY="${GATEWAY:-172.16.0.1}"
 PREFIX="${PREFIX:-30}"
 
@@ -59,7 +59,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. netns + tap0 + 网关（镜像 oas-net）
+# 1. netns + tapH0 + 网关（镜像 oas-net）
 ip netns add "$NS" 2>/dev/null || true
 ip netns exec "$NS" ip tuntap add dev "$TAP" mode tap
 ip netns exec "$NS" ip addr add "$GATEWAY/$PREFIX" dev "$TAP"
@@ -74,7 +74,7 @@ mkfs.ext4 -F "$RW" >/dev/null
 rm -f "$SOCK"
 setsid "$BIN" shim --config "$CFG" --sandbox-id "$SID" --socket "$SOCK" --log-file "$LOG" &
 SHIM_PID=$!
-echo "    shim pid=$SHIM_PID, log=$LOG"
+echo "    shim pid=$SHIM_PID, log= $LOG"
 
 # 4. 等 shim socket
 for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
@@ -100,7 +100,7 @@ echo "    state=$STATE"
 
 # 8. SSH（可选；镜像需 sshd + 静态 IP 172.16.0.2）
 echo "==> ssh 验证（ip netns exec $NS ssh $GUEST_IP）"
-if ip netns exec "$NS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes root@"$GUEST_IP" "echo SSH_OK; uname -a" 2>/dev/null; then
+if ip netns exec "$NS" ssh -i /home/yunfei/workspace/bin/usefull_sh/ubuntu-.id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes root@"$GUEST_IP" "echo SSH_OK; uname -a" 2>/dev/null; then
     echo "    OK: SSH 通"
 else
     echo "    WARN: SSH 不通（镜像 sshd/静态IP/密钥问题，非恢复链路问题）"

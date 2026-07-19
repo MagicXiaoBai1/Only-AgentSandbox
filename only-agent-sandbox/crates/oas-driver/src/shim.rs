@@ -107,14 +107,13 @@ pub fn run(args: ShimArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(target: "oas-shim", sid = %args.sandbox_id, "shim serving, waiting for Create");
 
-    // 阻塞至 Stop 触发 exit。
+    // 阻塞至 Stop 触发 exit（Stop 置位 *m=true 并 notify_all）。
     let (m, c) = &*exit;
-    let g = m.lock().unwrap();
-    let g = c
-        .wait_timeout(g, Duration::from_secs(1))
-        .unwrap()
-        .0;
-    let _ = *g;
+    let mut g = m.lock().unwrap();
+    while !*g {
+        g = c.wait(g).unwrap();
+    }
+    drop(g);
     // 给 ttrpc 把 Stop 响应发回去留点时间。
     std::thread::sleep(Duration::from_millis(150));
     Ok(())
@@ -197,7 +196,12 @@ impl ShimImpl {
             .arg("--daemonize")
             .arg("--")
             .arg("--api-sock")
-            .arg("run/firecracker.socket");
+            .arg("run/firecracker.socket")
+            // 让 firecracker 从启动起就写日志（独立于 API PUT /logger），便于诊断不响应/退出。
+            .arg("--log-path")
+            .arg(format!("fc-{}.log", self.sandbox_id))
+            .arg("--level")
+            .arg("Debug");
         let output = j
             .output()
             .map_err(|e| format!("spawn jailer: {e}"))?;
@@ -224,27 +228,34 @@ impl ShimImpl {
         let fc_pid = find_fc_pid(&self.jail_root)
             .ok_or_else(|| "firecracker pid not found after jailer spawn".to_string())?;
 
-        // logger + snapshot/load。
-        let fc = FirecrackerClient::new(&sock);
-        fc.put_logger(&self.cfg.log_dir.join(format!("fc-{}.log", self.sandbox_id)));
-        fc.put_snapshot_load("/vmstate.src", "/mem.src")
-            .map_err(|e| e.to_string())?;
+        // logger + snapshot/load + 写 meta。任一失败都要终止已拉起的 firecracker，
+        // 否则进程会泄漏（fc_pid 此刻还没写入 state，create 的错误分支不会清理）。
+        let result = (|| -> Result<(), String> {
+            let fc = FirecrackerClient::new(&sock);
+            fc.put_logger(&self.cfg.log_dir.join(format!("fc-{}.log", self.sandbox_id)));
+            fc.put_snapshot_load("/vmstate.src", "/mem.src")
+                .map_err(|e| e.to_string())?;
 
-        // 写 shim.meta（mntns inode 身份锚点）。
-        let ino = mntns_inode(fc_pid).map_err(|e| format!("stat mntns: {e}"))?;
-        let meta = ShimMeta {
-            fc_pid,
-            mntns_inode: ino,
-            started_at: 0,
-            shim_pid: std::process::id(),
-        };
-        let _ = meta.write(&self.meta_path);
+            // 写 shim.meta（mntns inode 身份锚点）。
+            let ino = mntns_inode(fc_pid).map_err(|e| format!("stat mntns: {e}"))?;
+            let meta = ShimMeta {
+                fc_pid,
+                mntns_inode: ino,
+                started_at: 0,
+                shim_pid: std::process::id(),
+            };
+            let _ = meta.write(&self.meta_path);
 
-        let mut st = self.state.lock().unwrap();
-        st.fc_pid = Some(fc_pid);
-        st.lifecycle = Lifecycle::Running;
-        st.created = true;
-        Ok(())
+            let mut st = self.state.lock().unwrap();
+            st.fc_pid = Some(fc_pid);
+            st.lifecycle = Lifecycle::Running;
+            st.created = true;
+            Ok(())
+        })();
+        if result.is_err() {
+            terminate_pid(fc_pid);
+        }
+        result
     }
 
     /// re-attach 已存活的 firecracker（runtime re-spawn shim 后调用）。
