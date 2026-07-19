@@ -89,7 +89,7 @@ impl Default for Config {
         Self {
             firecracker_bin: PathBuf::from("/home/yunfei/workspace/snap_double_shot/bin/firecracker"),
             jailer_bin: PathBuf::from("/home/yunfei/workspace/snap_double_shot/bin/jailer"),
-            chroot_base_dir: PathBuf::from("/home/yunfei/Code/Only-AgentSandbox/tmp/oas-test"),
+            chroot_base_dir: PathBuf::from("/home/yunfei/oas-test"),
             jailer_uid: 1234,
             jailer_gid: 1234,
             artifacts_dir: PathBuf::from("/var/lib/oas/artifacts"),
@@ -100,7 +100,7 @@ impl Default for Config {
             rw_base_dir: PathBuf::from("/var/lib/oas/rw"),
             rw_size_mib: 1024,
             net: NetConfig {
-                tap_name: "tap0".into(),
+                tap_name: "tapH0".into(),
                 tap_gateway: "172.16.0.1".into(),
                 tap_prefix: 30,
                 guest_ip: "172.16.0.2".into(),

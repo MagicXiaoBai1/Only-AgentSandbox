@@ -20,4 +20,4 @@ kubelet \
   --vmodule=kuberuntime_manager=6,kuberuntime_container=6,kuberuntime_sandbox=6,util=6,labels=6,pod_workers=5,generic=5 \
   > "$LOG_DIR/kubelet.log" 2>&1 &
 echo $! > "$WORK/kubelet.pid"
-echo "kubelet started, pid=$(cat $WORK/kubelet.pid), log=$LOG_DIR/kubelet.log"
+echo "kubelet started, pid=$(cat $WORK/kubelet.pid), log= $LOG_DIR/kubelet.log"
