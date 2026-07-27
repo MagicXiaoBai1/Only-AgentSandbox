@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::unistd::{chown, Gid, Uid};
 use oas_config::Config;
@@ -151,8 +151,10 @@ impl ShimImpl {
         if !req.cloud_disk_dev.is_empty() {
             return Err("cloud disk restore not supported in MVP".into());
         }
+        let t0 = Instant::now();
         let bundle = Path::new(&req.bundle_dir);
         // materialize 进 jail root 固定路径。
+        let t = Instant::now();
         std::fs::create_dir_all(&self.jail_root).map_err(|e| format!("mkdir jail root: {e}"))?;
         copy_file(bundle.join("vmlinux"), self.jail_root.join("vmlinux"))?;
         copy_file(bundle.join("rootfs.ext4"), self.jail_root.join("rootfs.ext4"))?;
@@ -164,7 +166,10 @@ impl ShimImpl {
                 self.jail_root.join("data.ext4"),
             )?;
         }
+        log_step(&self.sandbox_id, "materialize", t);
+
         // chown + chmod（跟随实验：0700 dir / 0444 ro / 0666 rw）。
+        let t = Instant::now();
         chmod(&self.jail_root, 0o0700);
         chown_path(&self.jail_root, req.jailer_uid, req.jailer_gid);
         for name in ["vmlinux", "rootfs.ext4", "vmstate.src", "mem.src"] {
@@ -177,8 +182,10 @@ impl ShimImpl {
             chmod(&p, 0o0666);
             chown_path(&p, req.jailer_uid, req.jailer_gid);
         }
+        log_step(&self.sandbox_id, "chmod_chown", t);
 
         // spawn jailer（--daemonize 后 jailer 自身很快退出）。
+        let t = Instant::now();
         let mut j = Command::new(&req.jailer_bin);
         j.arg("--id")
             .arg(&self.sandbox_id)
@@ -212,31 +219,45 @@ impl ShimImpl {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
+        log_step(&self.sandbox_id, "jailer_spawn", t);
 
-        // 等 API socket。
+        // 等 API socket。5ms 轮询:既测准 firecracker 冷启动到 bind 的真实耗时,
+        // 又避免 100ms 粒度最多白等 ~95ms。上限 100×100ms=10s 不变。
+        let t = Instant::now();
         let sock = self.fc_socket();
         let mut waited = 0;
+        std::thread::sleep(Duration::from_millis(5));
         while !sock.exists() {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(5));
             waited += 1;
-            if waited > 100 {
+            if waited > 2000 {
                 return Err("timeout waiting for firecracker socket".into());
             }
         }
+        log_step(&self.sandbox_id, "wait_fc_socket", t);
 
         // 找到 firecracker 的 host pid（按 jail root 命中 /proc/pid/root）。
+        let t = Instant::now();
         let fc_pid = find_fc_pid(&self.jail_root)
             .ok_or_else(|| "firecracker pid not found after jailer spawn".to_string())?;
+        log_step(&self.sandbox_id, "find_fc_pid", t);
 
         // logger + snapshot/load + 写 meta。任一失败都要终止已拉起的 firecracker，
         // 否则进程会泄漏（fc_pid 此刻还没写入 state，create 的错误分支不会清理）。
         let result = (|| -> Result<(), String> {
             let fc = FirecrackerClient::new(&sock);
+
+            let t = Instant::now();
             fc.put_logger(&self.cfg.log_dir.join(format!("fc-{}.log", self.sandbox_id)));
+            log_step(&self.sandbox_id, "put_logger", t);
+
+            let t = Instant::now();
             fc.put_snapshot_load("/vmstate.src", "/mem.src")
                 .map_err(|e| e.to_string())?;
+            log_step(&self.sandbox_id, "snapshot_load", t);
 
             // 写 shim.meta（mntns inode 身份锚点）。
+            let t = Instant::now();
             let ino = mntns_inode(fc_pid).map_err(|e| format!("stat mntns: {e}"))?;
             let meta = ShimMeta {
                 fc_pid,
@@ -245,6 +266,7 @@ impl ShimImpl {
                 shim_pid: std::process::id(),
             };
             let _ = meta.write(&self.meta_path);
+            log_step(&self.sandbox_id, "write_meta", t);
 
             let mut st = self.state.lock().unwrap();
             st.fc_pid = Some(fc_pid);
@@ -252,6 +274,7 @@ impl ShimImpl {
             st.created = true;
             Ok(())
         })();
+        log_step(&self.sandbox_id, "fresh_restore_total", t0);
         if result.is_err() {
             terminate_pid(fc_pid);
         }
@@ -260,8 +283,13 @@ impl ShimImpl {
 
     /// re-attach 已存活的 firecracker（runtime re-spawn shim 后调用）。
     fn re_attach(&self) -> Result<(), String> {
+        let t0 = Instant::now();
+        let t = Instant::now();
         let fc_pid = find_fc_pid(&self.jail_root)
             .ok_or_else(|| "no live firecracker to re-attach".to_string())?;
+        log_step(&self.sandbox_id, "re_attach:find_fc_pid", t);
+
+        let t = Instant::now();
         let ino = mntns_inode(fc_pid).map_err(|e| format!("stat mntns: {e}"))?;
         let meta = ShimMeta {
             fc_pid,
@@ -270,10 +298,13 @@ impl ShimImpl {
             shim_pid: std::process::id(),
         };
         let _ = meta.write(&self.meta_path);
+        log_step(&self.sandbox_id, "re_attach:write_meta", t);
+
         let mut st = self.state.lock().unwrap();
         st.fc_pid = Some(fc_pid);
         st.lifecycle = Lifecycle::Running;
         st.created = true;
+        log_step(&self.sandbox_id, "re_attach_total", t0);
         Ok(())
     }
 
@@ -292,10 +323,12 @@ impl Shim for ShimImpl {
         _ctx: &ttrpc::TtrpcContext,
         req: CreateRequest,
     ) -> ttrpc::Result<CreateResponse> {
+        let t_create = Instant::now();
         // 幂等快速路径。
         {
             let st = self.state.lock().unwrap();
             if st.created && st.fc_pid.is_some_and(pid_alive) {
+                tracing::info!(target: "oas-shim", sid = %self.sandbox_id, path = "idempotent", total_ms = t_create.elapsed().as_millis() as u64, "create done");
                 return Ok(CreateResponse {
                     state: st.lifecycle.as_str().into(),
                     error: String::new(),
@@ -305,10 +338,18 @@ impl Shim for ShimImpl {
         }
         // re-attach 判定：jail root 下已有活 firecracker。
         let result = if find_fc_pid(&self.jail_root).is_some() {
+            tracing::info!(target: "oas-shim", sid = %self.sandbox_id, "create: re-attach path");
             self.re_attach()
         } else {
+            tracing::info!(target: "oas-shim", sid = %self.sandbox_id, "create: fresh-restore path");
             self.fresh_restore(&req)
         };
+        tracing::info!(
+            target: "oas-shim",
+            sid = %self.sandbox_id,
+            total_ms = t_create.elapsed().as_millis() as u64,
+            "create done"
+        );
         if let Some(fc_pid) = self.state.lock().unwrap().fc_pid {
             self.start_watch(fc_pid);
         }
@@ -356,11 +397,61 @@ impl Shim for ShimImpl {
 
 // ---- 辅助 ------------------------------------------------------------------
 
+/// 记录单个恢复子步骤的耗时（ms）。供 `fresh_restore`/`re_attach` 分段打点，
+/// 落入 shim 日志（target=oas-shim），便于定位 restore 链路瓶颈。
+fn log_step(sid: &str, step: &str, start: Instant) {
+    tracing::info!(
+        target: "oas-shim",
+        sid = %sid,
+        step = %step,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "restore step"
+    );
+}
+
+/// reflink 优先的文件拷贝。
+///
+/// 同 CoW 文件系统(xfs reflink=1 / btrfs)上 `FICLONE` 仅复制元数据,瞬时完成,
+/// 不搬 3GB 数据 —— 这是设计要求的“写时复制 materialize”(见 概要设计 §存储、
+/// 实现计划-oas-driver-shim)。跨文件系统或不支持时(EXDEV/EOPNOTSUPP/ENOTTY)
+/// 自动降级为 `std::fs::copy` 全量拷贝,并记 debug 日志便于诊断为何没走 COW。
 fn copy_file(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<(), String> {
     let src = src.as_ref();
     let dst = dst.as_ref();
-    std::fs::copy(src, dst).map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
-    Ok(())
+    match reflink_copy(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::debug!(
+                target: "oas-shim",
+                src = %src.display(), dst = %dst.display(), err = %e,
+                "reflink unavailable, fallback to full copy"
+            );
+            std::fs::copy(src, dst)
+                .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+            Ok(())
+        }
+    }
+}
+
+/// `FICLONE` = `_IOW(0x94, 9, int)` = 0x40049409,见 Linux `<fs.h>`。
+const FICLONE: nix::libc::c_ulong = 0x40049409;
+
+fn reflink_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    let s = std::fs::File::open(src).map_err(|e| format!("open src: {e}"))?;
+    let d = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(dst)
+        .map_err(|e| format!("open dst: {e}"))?;
+    // ioctl(dst_fd, FICLONE, src_fd) — 让 dst 成为 src 的 CoW 克隆。
+    let r = unsafe { nix::libc::ioctl(d.as_raw_fd(), FICLONE, s.as_raw_fd()) };
+    if r == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    Err(format!("ioctl FICLONE: {err}"))
 }
 
 fn chmod(path: &Path, mode: u32) {

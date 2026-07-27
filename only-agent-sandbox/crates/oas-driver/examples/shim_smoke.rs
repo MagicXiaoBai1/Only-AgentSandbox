@@ -11,6 +11,7 @@
 //! （与 runtime 侧一致），故调用方只需保证 netns + tap0 已建好（test_shim.sh 负责）。
 
 use std::path::Path;
+use std::time::Instant;
 
 use oas_config::Config;
 use oas_driver::generated::shim::{CreateRequest, StateRequest, StopRequest};
@@ -51,14 +52,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 jailer_bin: cfg.jailer_bin.to_string_lossy().into_owned(),
                 ..Default::default()
             };
+            let t = Instant::now();
             let resp = sc.create(ttrpc::context::Context::default(), &req)?;
-            println!("create -> state={} error={}", resp.state, resp.error);
+            let elapsed_ms = t.elapsed().as_millis();
+            println!("create -> state={} error={} (rtt={}ms)", resp.state, resp.error, elapsed_ms);
             if resp.state != "Running" {
                 std::process::exit(1);
             }
         }
         "state" => {
             let sid = args.get(3).expect("sid").clone();
+            let t = Instant::now();
             let resp = sc.state(
                 ttrpc::context::Context::default(),
                 &StateRequest {
@@ -66,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
             )?;
-            println!("state -> {}", resp.state);
+            println!("state -> {} (rtt={}ms)", resp.state, t.elapsed().as_millis());
         }
         "stop" => {
             let sid = args.get(3).expect("sid").clone();

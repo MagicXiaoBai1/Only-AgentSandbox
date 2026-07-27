@@ -80,23 +80,41 @@ echo "    shim pid=$SHIM_PID, log= $LOG"
 for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || { echo "FAIL: shim socket 未出现，看 $LOG"; cat "$LOG" 2>/dev/null | tail -30; exit 1; }
 
-# 5. 触发恢复
+# 分步耗时分析：每步打印 elapsed ms；T0 为恢复链路总起点。
+# shim 内部分段打点见 $LOG（target=oas-shim, step=...）。
+now_ms() { date +%s%3N; }
+step_time() {  # <label> <start_ms>
+    local label="$1" start="$2" end
+    end=$(now_ms)
+    printf "    [time] %-22s %4d ms\n" "$label" "$((end - start))"
+}
+
+T0=$(now_ms)
+# 5. 触发恢复（create RPC 内部完成 materialize→jailer→snapshot/load→Running）
 echo "==> shim_smoke create"
+T=$(now_ms)
 "$SMOKE" create "$SOCK" "$CFG" "$SID" "$BUNDLE_DIR" "$RW"
+step_time "create (RPC)" "$T"
 
 # 6. 验证 firecracker 进程
-sleep 0.5
+T=$(now_ms); sleep 0.5; step_time "wait fc proc (sleep)" "$T"
+T=$(now_ms)
 if pgrep -a firecracker >/dev/null; then
     echo "    OK: firecracker 进程存在"
 else
     echo "FAIL: 未找到 firecracker 进程"; cat "$LOG" 2>/dev/null | tail -40; exit 1
 fi
+step_time "pgrep fc" "$T"
 
 # 7. state = Running
 echo "==> shim_smoke state"
-STATE=$("$SMOKE" state "$SOCK" "$SID" | sed 's/state -> //')
+T=$(now_ms)
+STATE=$("$SMOKE" state "$SOCK" "$SID" | sed 's/state -> //; s/ (rtt=.*//')
 echo "    state=$STATE"
+step_time "state (RPC)" "$T"
 [ "$STATE" = "Running" ] || { echo "FAIL: state != Running"; exit 1; }
+step_time "TOTAL create→Running" "$T0"
+echo "    [time] shim 内部分段见 $LOG (grep 'restore step\|create done')"
 
 # 8. SSH（可选；镜像需 sshd + 静态 IP 172.16.0.2）
 echo "==> ssh 验证（ip netns exec $NS ssh $GUEST_IP）"
