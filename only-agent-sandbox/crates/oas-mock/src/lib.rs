@@ -281,6 +281,7 @@ impl NetworkManager for MockNet {
             pod_ip: lease.ip.clone(),
             gateway: self.gateway.clone(),
             lease,
+            host_veth: String::new(),
         })
     }
 

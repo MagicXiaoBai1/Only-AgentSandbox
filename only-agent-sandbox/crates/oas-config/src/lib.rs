@@ -32,6 +32,35 @@ pub struct NetConfig {
     pub pod_cidr: String,
     /// pod 网关（信息字段）。
     pub pod_gateway: String,
+    /// guest-agent 监听端口；A1 要求 `PodIP:port` DNAT 到 `guest_ip:port`。
+    pub guest_agent_port: u16,
+    /// 是否在 host 建 veth 并把 PodIP 挂到 netns eth0（同节点可达）。
+    #[serde(default = "default_true")]
+    pub enable_host_veth: bool,
+    /// netns 内承载 PodIP 的接口名。
+    #[serde(default = "default_pod_iface")]
+    pub pod_iface: String,
+    /// 是否为 guest 出向安装 NAT/转发规则。
+    #[serde(default = "default_true")]
+    pub enable_guest_egress: bool,
+    /// shim Create 是否等待 guest-agent TCP 可达。
+    #[serde(default = "default_true")]
+    pub wait_guest_agent: bool,
+    /// 等待 guest-agent 的超时（秒）。
+    #[serde(default = "default_agent_wait_secs")]
+    pub guest_agent_wait_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_pod_iface() -> String {
+    "eth0".into()
+}
+
+fn default_agent_wait_secs() -> u64 {
+    30
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +136,12 @@ impl Default for Config {
                 guest_mac: "06:00:AC:10:00:02".into(),
                 pod_cidr: "10.244.0.0/24".into(),
                 pod_gateway: "10.244.0.254".into(),
+                guest_agent_port: 10000,
+                enable_host_veth: true,
+                pod_iface: "eth0".into(),
+                enable_guest_egress: true,
+                wait_guest_agent: true,
+                guest_agent_wait_secs: 30,
             },
             types: vec![
                 SandboxType {
@@ -116,7 +151,7 @@ impl Default for Config {
                     mem_mib: 512,
                     has_rw_layer: false,
                     has_cloud_disk: false,
-                    image_whitelist: vec!["img-a".into()],
+                    image_whitelist: vec!["img-a".into(), "guest-agent".into()],
                 },
                 SandboxType {
                     type_id: 1,
@@ -125,7 +160,7 @@ impl Default for Config {
                     mem_mib: 1024,
                     has_rw_layer: true,
                     has_cloud_disk: false,
-                    image_whitelist: vec!["img-b".into()],
+                    image_whitelist: vec!["img-b".into(), "guest-agent".into()],
                 },
                 SandboxType {
                     type_id: 2,
@@ -134,7 +169,7 @@ impl Default for Config {
                     mem_mib: 2048,
                     has_rw_layer: true,
                     has_cloud_disk: true,
-                    image_whitelist: vec!["img-c".into()],
+                    image_whitelist: vec!["img-c".into(), "guest-agent".into()],
                 },
             ],
         }
@@ -196,12 +231,18 @@ impl Config {
         self.types.iter().find(|t| t.type_id == type_id)
     }
 
-    /// 全部白名单镜像（供 `list_images`）。
+    /// 全部白名单镜像（供 `list_images`）；按出现顺序去重。
     pub fn all_images(&self) -> Vec<&str> {
-        self.types
-            .iter()
-            .flat_map(|t| t.image_whitelist.iter().map(String::as_str))
-            .collect()
+        let mut out: Vec<&str> = Vec::new();
+        for t in &self.types {
+            for img in &t.image_whitelist {
+                let base = image_base_name(img);
+                if !out.iter().any(|x| image_base_name(x) == base) {
+                    out.push(img.as_str());
+                }
+            }
+        }
+        out
     }
 
     /// 镜像是否被任一 type 白名单允许（按 base name 匹配）。

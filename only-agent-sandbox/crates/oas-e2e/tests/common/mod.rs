@@ -75,6 +75,7 @@ pub fn sandbox_req(uid: &str, type_id: u8) -> oas_manager::CreateSandboxRequest 
         type_id,
         cloud_disk_ref: None,
         rw_size: None,
+        runtime_handler: "oas".into(),
     }
 }
 

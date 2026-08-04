@@ -479,11 +479,12 @@ async fn pull_image_whitelist_and_reject() {
 async fn list_images_flattens_whitelist() {
     let env = TestEnv::new();
     let imgs = env.mgr.list_images().await.unwrap();
-    assert_eq!(imgs.len(), 3);
+    assert_eq!(imgs.len(), 4);
     let refs: Vec<&str> = imgs.iter().map(|i| i.image_ref.as_str()).collect();
     assert!(refs.contains(&"img-a"));
     assert!(refs.contains(&"img-b"));
     assert!(refs.contains(&"img-c"));
+    assert!(refs.contains(&"guest-agent"));
 }
 
 #[tokio::test]

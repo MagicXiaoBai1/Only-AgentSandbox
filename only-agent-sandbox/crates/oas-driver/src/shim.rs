@@ -256,6 +256,18 @@ impl ShimImpl {
                 .map_err(|e| e.to_string())?;
             log_step(&self.sandbox_id, "snapshot_load", t);
 
+            // A1：可选等待 guest-agent TCP 可达后再报 Running。
+            if self.cfg.net.wait_guest_agent {
+                let t = Instant::now();
+                wait_tcp_in_netns(
+                    &req.netns_path,
+                    &self.cfg.net.guest_ip,
+                    self.cfg.net.guest_agent_port,
+                    self.cfg.net.guest_agent_wait_secs,
+                )?;
+                log_step(&self.sandbox_id, "wait_guest_agent", t);
+            }
+
             // 写 shim.meta（mntns inode 身份锚点）。
             let t = Instant::now();
             let ino = mntns_inode(fc_pid).map_err(|e| format!("stat mntns: {e}"))?;
@@ -396,6 +408,54 @@ impl Shim for ShimImpl {
 }
 
 // ---- 辅助 ------------------------------------------------------------------
+
+/// 在沙箱 netns 内轮询 TCP 连通 `guest_ip:port`（guest-agent Ready）。
+fn wait_tcp_in_netns(
+    netns_path: &str,
+    guest_ip: &str,
+    port: u16,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let ns = netns_path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(netns_path);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let py = format!(
+        "import socket; s=socket.create_connection(('{guest_ip}',{port}),1); s.close()"
+    );
+    while Instant::now() < deadline {
+        let ok = Command::new("ip")
+            .args(["netns", "exec", ns, "python3", "-c", &py])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok(());
+        }
+        // bash /dev/tcp 兜底（无 python3 时）。
+        let bash_ok = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                ns,
+                "bash",
+                "-c",
+                &format!("echo >/dev/tcp/{guest_ip}/{port}"),
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if bash_ok {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err(format!(
+        "timeout waiting for guest-agent {guest_ip}:{port} in netns {ns} ({timeout_secs}s)"
+    ))
+}
 
 /// 记录单个恢复子步骤的耗时（ms）。供 `fresh_restore`/`re_attach` 分段打点，
 /// 落入 shim 日志（target=oas-shim），便于定位 restore 链路瓶颈。

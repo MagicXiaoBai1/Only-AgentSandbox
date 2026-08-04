@@ -160,6 +160,7 @@ fn parse_type_id(annotations: &HashMap<String, String>) -> Result<u8, OasError> 
 
 pub fn sandbox_config_to_create_req(
     cfg: &pb::PodSandboxConfig,
+    runtime_handler: &str,
 ) -> Result<CreateSandboxRequest, OasError> {
     let metadata = cfg
         .metadata
@@ -180,6 +181,11 @@ pub fn sandbox_config_to_create_req(
         .as_ref()
         .map(|l| l.cgroup_parent.clone())
         .unwrap_or_default();
+    let handler = if runtime_handler.is_empty() {
+        "oas".to_string()
+    } else {
+        runtime_handler.to_string()
+    };
 
     Ok(CreateSandboxRequest {
         metadata: pod_metadata_to_domain(metadata),
@@ -192,6 +198,7 @@ pub fn sandbox_config_to_create_req(
         type_id,
         cloud_disk_ref,
         rw_size,
+        runtime_handler: handler,
     })
 }
 
@@ -254,7 +261,7 @@ pub fn record_to_sandbox_status(r: &oas_types::SandboxRecord) -> pb::PodSandboxS
         linux: None,
         labels: r.labels.clone(),
         annotations: r.annotations.clone(),
-        runtime_handler: String::new(),
+        runtime_handler: r.runtime_handler.clone(),
     }
 }
 
@@ -266,7 +273,7 @@ pub fn record_to_sandbox(r: &oas_types::SandboxRecord) -> pb::PodSandbox {
         created_at: secs_to_ns(r.created_at),
         labels: r.labels.clone(),
         annotations: r.annotations.clone(),
-        runtime_handler: String::new(),
+        runtime_handler: r.runtime_handler.clone(),
     }
 }
 
@@ -541,10 +548,11 @@ mod tests {
             linux: None,
             windows: None,
         };
-        let req = sandbox_config_to_create_req(&cfg).unwrap();
+        let req = sandbox_config_to_create_req(&cfg, "oas").unwrap();
         assert_eq!(req.labels, labels);
         assert_eq!(req.annotations, ann);
         assert_eq!(req.type_id, 1);
+        assert_eq!(req.runtime_handler, "oas");
     }
 
     #[test]
@@ -565,9 +573,40 @@ mod tests {
             metadata: Some(pb::PodSandboxMetadata::default()),
             ..Default::default()
         };
-        match sandbox_config_to_create_req(&cfg) {
+        match sandbox_config_to_create_req(&cfg, "oas") {
             Err(OasError::InvalidArgument(_)) => {}
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_handler_roundtrip_in_sandbox_status() {
+        let rec = oas_types::SandboxRecord {
+            sandbox_id: "sb-1".into(),
+            pod_uid: "uid-1".into(),
+            metadata: oas_types::SandboxMetadata {
+                name: "n".into(),
+                namespace: "ns".into(),
+                uid: "uid-1".into(),
+                attempt: 0,
+            },
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            type_id: 0,
+            netns_path: "/var/run/netns/oas-sb-1".into(),
+            tap_name: "tapH0".into(),
+            mac: "06:00:AC:10:00:02".into(),
+            pod_ip: "10.244.0.2".into(),
+            gateway: "10.244.0.254".into(),
+            rw_layer_path: None,
+            cloud_disk_dev: None,
+            state: oas_types::SandboxState::Ready,
+            created_at: 1,
+            runtime_handler: "oas".into(),
+            host_veth: String::new(),
+        };
+        let status = record_to_sandbox_status(&rec);
+        assert_eq!(status.runtime_handler, "oas");
+        assert_eq!(record_to_sandbox(&rec).runtime_handler, "oas");
     }
 }

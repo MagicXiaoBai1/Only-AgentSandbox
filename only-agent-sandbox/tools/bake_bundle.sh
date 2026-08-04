@@ -6,11 +6,13 @@
 # InstanceStart → Pause → snapshot/create → 把 vmlinux/rootfs.ext4/vmstate/mem 拷进 bundle。
 #
 # 烘焙出的 snapshot 含 virtio-net（iface_id=net1, host_dev_name=$TAP_NAME, guest_mac=$FC_MAC），
-# 故 restore 时 firecracker 会自动连 netns 内同名 tap。guest 镜像须已配 eth0 静态 IP + sshd。
+# 故 restore 时 firecracker 会自动连 netns 内同名 tap。guest 镜像须已配 eth0 静态 IP。
+# 若设置 GUEST_AGENT_BIN，会在 snapshot 前把 guest-agent 注入 rootfs 并开机监听 :10000。
 #
 # 用法：
 #   bake_bundle.sh <bundle> [vcpu] [mem_mib]
 #   例: bake_bundle.sh base-1 2 1024
+#   例: GUEST_AGENT_BIN=/path/to/guest_agent bake_bundle.sh base-1 2 1024
 #
 # 环境变量（默认值见下，可覆盖）：
 set -euo pipefail
@@ -33,6 +35,9 @@ UID_FC="${UID_FC:-1234}"
 GID_FC="${GID_FC:-1234}"
 TAP_NAME="${TAP_NAME:-tapH0}"
 FC_MAC="${FC_MAC:-06:00:AC:10:00:02}"
+GUEST_AGENT_BIN="${GUEST_AGENT_BIN:-}"
+GUEST_AGENT_PORT="${GUEST_AGENT_PORT:-10000}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ID_A="bake-$BUNDLE"
 ROOT_A="$BASE/firecracker/$ID_A/root"
@@ -63,10 +68,19 @@ mkdir -p "$ROOT_A"
 cp --reflink=auto "$KERNEL" "$ROOT_A/vmlinux"
 cp --reflink=auto "$ROOTFS" "$ROOT_A/rootfs.ext4"
 cp --reflink=auto "$DATA_SRC" "$ROOT_A/data.ext4"
-chown -R "$UID_FC:$GID_FC" "$ROOT_A/"
-chmod 0777 "$ROOT_A"
-chmod 0444 "$ROOT_A/vmlinux" "$ROOT_A/rootfs.ext4"
-chmod 0666 "$ROOT_A/data.ext4"
+
+if [[ -n "$GUEST_AGENT_BIN" ]]; then
+  echo "==> injecting guest-agent from $GUEST_AGENT_BIN"
+  sudo "$SCRIPT_DIR/inject_guest_agent.sh" "$ROOT_A/rootfs.ext4" "$GUEST_AGENT_BIN" "$GUEST_AGENT_PORT"
+fi
+
+# inject 经 sudo 可能把 rootfs 属主改成 root；jailer 需要 uid/gid=$UID_FC。
+if ! chown -R "$UID_FC:$GID_FC" "$ROOT_A/" 2>/dev/null; then
+  sudo chown -R "$UID_FC:$GID_FC" "$ROOT_A/"
+fi
+chmod 0777 "$ROOT_A" || sudo chmod 0777 "$ROOT_A"
+chmod 0444 "$ROOT_A/vmlinux" "$ROOT_A/rootfs.ext4" || sudo chmod 0444 "$ROOT_A/vmlinux" "$ROOT_A/rootfs.ext4"
+chmod 0666 "$ROOT_A/data.ext4" || sudo chmod 0666 "$ROOT_A/data.ext4"
 
 # 启动 jailer + firecracker A（进烘焙 netns）。
 echo "启动 jailer + firecracker A（进烘焙 netns）"
@@ -113,7 +127,33 @@ curl -sS -X PUT --unix-socket "$SOCK_A" \
 curl -sS -X PUT --unix-socket "$SOCK_A" \
   --data '{"action_type":"InstanceStart"}' "http://localhost/actions"
 
-sleep 2
+GUEST_IP="${GUEST_IP:-172.16.0.2}"
+AGENT_WAIT_SECS="${AGENT_WAIT_SECS:-60}"
+
+if [[ -n "$GUEST_AGENT_BIN" ]]; then
+  echo "==> waiting for guest-agent at ${GUEST_IP}:${GUEST_AGENT_PORT} (up to ${AGENT_WAIT_SECS}s)"
+  ready=0
+  for _ in $(seq 1 "$AGENT_WAIT_SECS"); do
+    if ip netns exec "$NETNS" python3 -c \
+      "import socket; s=socket.create_connection(('${GUEST_IP}',${GUEST_AGENT_PORT}),1); s.close()" \
+      2>/dev/null; then
+      ready=1
+      break
+    fi
+    if ip netns exec "$NETNS" bash -c "echo >/dev/tcp/${GUEST_IP}/${GUEST_AGENT_PORT}" 2>/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    echo "ERROR: guest-agent not reachable before snapshot; refusing to bake cold image" >&2
+    exit 1
+  fi
+  echo "==> guest-agent ready; pausing for snapshot"
+else
+  sleep 2
+fi
 
 curl -sS -X PATCH --unix-socket "$SOCK_A" \
   --data '{"state":"Paused"}' "http://localhost/vm"

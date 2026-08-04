@@ -132,6 +132,7 @@ fn net_cfg_from(rec: &SandboxRecord) -> NetConfig {
             cidr: String::new(),
             sandbox_id: rec.sandbox_id.clone(),
         },
+        host_veth: rec.host_veth.clone(),
     }
 }
 
@@ -272,6 +273,12 @@ impl Manager for OasManager {
             cloud_disk_dev: disk.cloud_disk_dev.clone(),
             state: SandboxState::Ready,
             created_at: self.clock.now_unix_secs(),
+            runtime_handler: if req.runtime_handler.is_empty() {
+                "oas".into()
+            } else {
+                req.runtime_handler.clone()
+            },
+            host_veth: net_cfg.host_veth.clone(),
         };
         let rec_clone = rec.clone();
         if let Err(e) = self

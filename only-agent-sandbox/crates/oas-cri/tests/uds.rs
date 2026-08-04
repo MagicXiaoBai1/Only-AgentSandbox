@@ -67,6 +67,8 @@ async fn handshake_and_stub_short_circuit_over_uds() {
         .await
         .unwrap()
         .into_inner();
+    assert_eq!(s.runtime_handlers.len(), 1);
+    assert_eq!(s.runtime_handlers[0].name, "oas");
     let conditions = s.status.unwrap().conditions;
     assert_eq!(conditions.len(), 2);
     assert!(
@@ -112,7 +114,7 @@ async fn handshake_and_stub_short_circuit_over_uds() {
 
     assert!(stats.stats.is_empty());
     
-    // RunPodSandbox（带合法 type 注解）→ stub 返回 UNAVAILABLE。
+    // RunPodSandbox：未知 handler 在进入 manager 前拒绝。
     let cfg = PodSandboxConfig {
         metadata: Some(PodSandboxMetadata {
             name: "n".into(),
@@ -127,8 +129,18 @@ async fn handshake_and_stub_short_circuit_over_uds() {
     };
     let err = rt
         .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(cfg.clone()),
+            runtime_handler: "kata-fc".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // oas handler 通过校验后进入 stub manager，返回 UNAVAILABLE。
+    let err = rt
+        .run_pod_sandbox(RunPodSandboxRequest {
             config: Some(cfg),
-            runtime_handler: String::new(),
+            runtime_handler: "oas".into(),
         })
         .await
         .unwrap_err();

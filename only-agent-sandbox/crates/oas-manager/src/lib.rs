@@ -75,6 +75,8 @@ pub struct CreateSandboxRequest {
     pub cloud_disk_ref: Option<String>,
     /// 从 annotation `agent-sandbox/rw-size` 解析。
     pub rw_size: Option<u64>,
+    /// CRI `runtime_handler`（空串视为默认 `oas`）。
+    pub runtime_handler: String,
 }
 
 /// `CreateContainer` 的领域请求。

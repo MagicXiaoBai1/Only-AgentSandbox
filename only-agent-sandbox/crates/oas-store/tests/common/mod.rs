@@ -34,6 +34,8 @@ fn sb(id: &str, uid: &str, state: SandboxState) -> SandboxRecord {
         cloud_disk_dev: None,
         state,
         created_at: 100,
+        runtime_handler: "oas".into(),
+        host_veth: String::new(),
     }
 }
 

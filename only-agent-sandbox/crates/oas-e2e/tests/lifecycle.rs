@@ -397,7 +397,7 @@ async fn e2e_image_status_whitelist() {
         .unwrap()
         .into_inner()
         .images;
-    assert_eq!(imgs.len(), 3);
+    assert_eq!(imgs.len(), 4);
 }
 
 #[tokio::test]

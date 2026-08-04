@@ -69,7 +69,13 @@ impl RuntimeService for RuntimeSvc {
             Ok(Response::new(pb::StatusResponse {
                 status: Some(pb::RuntimeStatus { conditions }),
                 info: HashMap::new(),
-                runtime_handlers: Vec::new(),
+                runtime_handlers: vec![pb::RuntimeHandler {
+                    name: "oas".into(),
+                    features: Some(pb::RuntimeHandlerFeatures {
+                        recursive_read_only_mounts: false,
+                        user_namespaces: false,
+                    }),
+                }],
                 features: None,
             }))
         })
@@ -103,10 +109,17 @@ impl RuntimeService for RuntimeSvc {
     ) -> Result<Response<pb::RunPodSandboxResponse>, Status> {
         let req = req.into_inner();
         cri_call!("RunPodSandbox", &req, async move {
+            let handler = req.runtime_handler.trim();
+            if !(handler.is_empty() || handler == "oas") {
+                return Err(Status::invalid_argument(format!(
+                    "unsupported runtime_handler: {handler}"
+                )));
+            }
             let cfg = req
                 .config
                 .ok_or_else(|| Status::invalid_argument("missing pod sandbox config"))?;
-            let create_req = convert::sandbox_config_to_create_req(&cfg).map_err(to_status)?;
+            let create_req =
+                convert::sandbox_config_to_create_req(&cfg, handler).map_err(to_status)?;
             let id = self.mgr.run_sandbox(create_req).await.map_err(to_status)?;
             Ok(Response::new(pb::RunPodSandboxResponse {
                 pod_sandbox_id: id,

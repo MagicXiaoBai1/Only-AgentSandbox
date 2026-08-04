@@ -1,0 +1,3 @@
+[submodule "containerd"]
+	path = containerd
+	url = https://github.com/containerd/containerd.git
