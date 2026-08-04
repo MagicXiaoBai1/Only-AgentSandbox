@@ -1,0 +1,31 @@
+[package]
+name = "oas-ctrd-shim"
+version = "0.1.0"
+edition = "2021"       # containerd-shim 生态按 2021 验证; 与 workspace 的 2024 混用 (resolver=2 允许)。
+
+[lib]
+name = "oas_ctrd_shim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "containerd-shim-oas-v2"
+path = "src/main.rs"
+
+[dependencies]
+# containerd runtime v2 shim 骨架 + sandbox/task 生成类型 (0.11 与 workspace ttrpc 0.9 对齐;
+# 0.10 会拉 ttrpc 0.8 造成双份, 故用 0.11)。
+containerd-shim          = { version = "0.11", features = ["async"] }
+containerd-shim-protos   = { version = "0.11", features = ["async", "sandbox"] }
+ttrpc                    = "0.9"
+async-trait              = { workspace = true }
+tokio                    = { workspace = true }
+protobuf                 = "3"
+nix                      = { version = "0.29", features = ["process", "signal", "user", "fs", "sched", "mount"] }
+anyhow                   = "1"
+log                      = "0.4"
+serde                    = { workspace = true }
+serde_json               = { workspace = true }
+# 复用现有 crate
+oas-driver = { path = "../oas-driver" }
+oas-config = { path = "../oas-config" }
+oas-types  = { path = "../oas-types" }
