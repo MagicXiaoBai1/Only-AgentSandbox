@@ -1,4 +1,4 @@
-// Task 路径: 从 bundle 的 OCI `config.json` 提炼 shim 需要的三件事。
+// Task 路径: 从 bundle 的 OCI `config.json` 提炼 shim 需要的字段。
 //
 // containerd 1.6.33 的 Task 路径不像 2.x Sandbox API 那样把 netns 当请求一等字段传,
 // 而是把它塞进 bundle OCI spec 的 `spec.linux.Namespaces[type=network].Path`
@@ -7,9 +7,15 @@
 // - `container_type`: `io.kubernetes.cri.container-type` (`sandbox` / `container`)。
 // - `sandbox_id`: `io.kubernetes.cri.sandbox-id` (container-Task 指回所属 pod; grouping 用)。
 // - `netns_path`: network 类型 namespace 的 `path` (交 driver 建 tap0)。
+// - `type_id`: pod annotation `agent-sandbox/type` (选 bundle type; 见下方注意)。
 //
 // 两条协议路径的 netns 来源不同 (Sandbox 是请求字段、Task 在 spec 里), 但拿到 netns
 // 之后统一交 driver——本 helper 属 common, 供 Task 路径的 start 归组与 create 复用。
+//
+// **type_id 透传注意**: `agent-sandbox/type` 是 pod annotation, containerd CRI 默认 **不**
+// 把任意 pod annotation 写进 OCI spec (只注入它自己的 `io.kubernetes.cri.*`)。须在
+// containerd config.toml 配 `pod_annotations = ["agent-sandbox/.*"]` 才会进 config.json。
+// 未配 / 裸 ctr run 时 `type_id` 为 None, 调用方回落 0 (见 TaskService::create)。
 
 use std::path::Path;
 
@@ -19,6 +25,9 @@ use serde::Deserialize;
 pub const ANNOTATION_CONTAINER_TYPE: &str = "io.kubernetes.cri.container-type";
 /// CRI annotation: 业务容器指回所属 pod 的 sandbox id (container-Task 才有)。
 pub const ANNOTATION_SANDBOX_ID: &str = "io.kubernetes.cri.sandbox-id";
+/// OAS pod annotation: sandbox bundle type (选 `$artifacts/snapshots/<bundle>`)。
+/// 需 containerd `pod_annotations` 透传才进 config.json (见模块注释)。
+pub const ANNOTATION_TYPE: &str = "agent-sandbox/type";
 
 /// container-type annotation 的两种取值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +48,8 @@ pub struct BundleSpec {
     pub sandbox_id: Option<String>,
     /// network namespace 的 path (无则 None, driver 侧当 不进 netns)。
     pub netns_path: Option<String>,
+    /// `agent-sandbox/type` 解析出的 bundle type_id; None 表示未透传 (回落 0)。
+    pub type_id: Option<u8>,
 }
 
 // ---- OCI config.json 局部反序列化 (只取需要的字段) -------------------------
@@ -94,11 +105,18 @@ pub fn parse_bundle_spec(bytes: &[u8]) -> Result<BundleSpec, String> {
         .and_then(|l| l.namespaces.iter().find(|n| n.ns_type == "network"))
         .map(|n| n.path.clone())
         .filter(|p| !p.is_empty());
+    // agent-sandbox/type: pod annotation, 须 containerd pod_annotations 透传才在。
+    let type_id = spec
+        .annotations
+        .get(ANNOTATION_TYPE)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u8>().ok());
 
     Ok(BundleSpec {
         container_type,
         sandbox_id,
         netns_path,
+        type_id,
     })
 }
 
@@ -156,5 +174,32 @@ mod tests {
         }"#;
         let s = parse_bundle_spec(json).unwrap();
         assert_eq!(s.netns_path, None);
+    }
+
+    #[test]
+    fn type_id_parsed_from_annotation() {
+        let json = br#"{
+            "annotations": {
+                "io.kubernetes.cri.container-type": "sandbox",
+                "agent-sandbox/type": "1"
+            }
+        }"#;
+        let s = parse_bundle_spec(json).unwrap();
+        assert_eq!(s.type_id, Some(1));
+    }
+
+    #[test]
+    fn type_id_absent_is_none() {
+        // 裸 ctr run / 未配 pod_annotations: annotation 不在 → None (调用方回落 0)。
+        let json = br#"{"ociVersion": "1.0.0"}"#;
+        let s = parse_bundle_spec(json).unwrap();
+        assert_eq!(s.type_id, None);
+    }
+
+    #[test]
+    fn type_id_invalid_is_none() {
+        let json = br#"{"annotations": {"agent-sandbox/type": "not-a-number"}}"#;
+        let s = parse_bundle_spec(json).unwrap();
+        assert_eq!(s.type_id, None);
     }
 }

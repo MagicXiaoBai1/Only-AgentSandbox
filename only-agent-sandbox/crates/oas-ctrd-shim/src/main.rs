@@ -13,15 +13,17 @@
 //! 用 `server::build_and_start` 注册 Sandbox+Task (见清单#1 / kata 同款手动 register).
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use containerd_shim as shim;
 use containerd_shim_protos::protobuf::Message;
 use containerd_shim_protos::types::introspection::{RuntimeInfo, RuntimeVersion};
 
+use oas_config::Config;
 use oas_ctrd_shim::common::server;
 use oas_ctrd_shim::common::start;
-use oas_ctrd_shim::common::vm::MockVm;
+use oas_ctrd_shim::common::vm::{MockVm, RealVm, SandboxVm};
 
 const RUNTIME_ID: &str = "io.containerd.oas.v2";
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -65,8 +67,18 @@ fn main() {
         }
 
         "delete" => {
-            // P1 mock 下退: 无 firecracker 进程可杀, 回默认 DeleteResponse.
-            // 真下层接入后走 oas-driver 的 emergency_kill.
+            // containerd 在 shim 不可达时调本二进制 delete 做应急回收。
+            // 真下层: 走 oas-driver emergency_kill（读 shim.meta → 身份校验 → 杀 fc → 清 jail root/socket）。
+            let cfg = load_config();
+            let sid = flags.id.as_str();
+            if !sid.is_empty() {
+                let sandbox_dir = cfg.sandbox_dir(sid);
+                let jail_root = cfg.jail_root(sid);
+                let socket = cfg.shim_socket(sid);
+                if let Err(e) = oas_driver::emergency_kill(&sandbox_dir, &jail_root, &socket) {
+                    eprintln!("containerd-shim-oas-v2: delete emergency_kill: {e}");
+                }
+            }
             let resp = containerd_shim_protos::api::DeleteResponse::new();
             if let Ok(bytes) = resp.write_to_bytes() {
                 let _ = std::io::stdout().write_all(&bytes);
@@ -90,13 +102,14 @@ fn main() {
 
 /// 常驻 server: bind socket + serve Sandbox(+Task), 阻塞至 ShutdownSandbox.
 fn run_server(socket_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = Arc::new(load_config());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
 
     rt.block_on(async move {
-        let vm = Arc::new(MockVm::new());
+        let vm = make_vm(cfg);
         let (mut server, exit) = server::build_and_start(socket_addr, vm).await?;
 
         // socket 已 bind + serve 就绪: 向 stdout 报地址, 然后把 stdout 重定向到
@@ -108,6 +121,27 @@ fn run_server(socket_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         server.shutdown().await.ok();
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+/// 解析配置: `OAS_CONFIG` 环境变量 → `/etc/oas/config.toml` → `Config::default()`。
+///
+/// containerd 经 Legacy start 协议拉起 shim, `shim::parse` 不透传 `--config`（见 ADR 0010）,
+/// 故走 env + 固定路径。`Config::load` 本身对文件缺失回落 Default, 故两路径都覆盖。
+fn load_config() -> Config {
+    if let Ok(p) = std::env::var("OAS_CONFIG") {
+        return Config::load(Path::new(&p));
+    }
+    Config::load(Path::new("/etc/oas/config.toml"))
+}
+
+/// 造下层 VM: 默认 `RealVm`（真 firecracker restore）; `OAS_VM=mock` 退回 `MockVm`
+/// 供无 firecracker/bundle 环境下的协议级 e2e 复用。
+fn make_vm(cfg: Arc<Config>) -> Arc<dyn SandboxVm> {
+    if std::env::var("OAS_VM").as_deref() == Ok("mock") {
+        Arc::new(MockVm::new())
+    } else {
+        Arc::new(RealVm::new(cfg))
+    }
 }
 
 /// 输出 RuntimeInfo protobuf 到 stdout (containerd 2.x `-info` 探测).

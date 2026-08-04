@@ -18,8 +18,10 @@ pub mod firecracker;
 pub mod generated;
 pub mod identity;
 pub mod shim;
+pub mod vm_core;
 
-pub use driver::RealDriver;
+pub use driver::{emergency_kill, RealDriver};
+pub use vm_core::{GuestEndpoint, RestoreInputs, VmCore, VmCoreState, VmHandle};
 
 // ---------------------------------------------------------------------------
 // 网络规格（create_vm 入参，向前兼容 CNI）

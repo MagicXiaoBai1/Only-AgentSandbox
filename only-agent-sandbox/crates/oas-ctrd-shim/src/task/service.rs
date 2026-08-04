@@ -133,7 +133,9 @@ impl Task for TaskService {
                 let args = crate::common::vm::VmCreateArgs {
                     sandbox_id: req.id.clone(),
                     netns_path: spec.netns_path.clone().unwrap_or_default(),
-                    type_id: 0, // Task 路径 P1 固定 bundle type 0 (annotation 选型留后期)。
+                    // pod annotation `agent-sandbox/type` (经 containerd pod_annotations 透传);
+                    // 未透传 / 裸 ctr run 回落 0。
+                    type_id: spec.type_id.unwrap_or(0),
                 };
                 vm.create(args)
                     .await

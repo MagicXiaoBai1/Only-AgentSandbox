@@ -5,9 +5,11 @@
 //!
 //! shim 是「单 VM 守护进程」: 一个进程管一个 sandbox, 故 VM 状态是进程内单例.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use oas_config::Config;
+use oas_driver::vm_core::{RestoreInputs, VmCore, VmCoreState};
 
 /// VM 生命周期状态 (映射到 containerd sandbox 期望的 state 字符串).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,5 +177,162 @@ impl SandboxVm for MockVm {
         }
         let _ = self.exit.send(Some(0));
         Ok(())
+    }
+}
+
+// ---- RealVm ----------------------------------------------------------------
+
+/// 真下层: 经 `oas_driver::vm_core` 在进程内拉起真实 firecracker 做 snapshot 恢复。
+///
+/// 与 `MockVm` 实现**同一 `SandboxVm` 契约**, 故上层 `TaskService`/`server` 无需改动——
+/// `run_server` 注入 `RealVm` 即从「假下层」切到「真 firecracker」。详见 ADR 0009。
+///
+/// `VmCore` 是同步库(做阻塞 FS/进程/HTTP-UDS 工作), 本 impl 经 `spawn_blocking` 桥接到
+/// 异步 `SandboxVm`, 不占 tokio worker 线程。
+pub struct RealVm {
+    cfg: Arc<Config>,
+    /// 懒构造: 首次 `create` 拿到 sandbox_id 才建 `VmCore`（一个 shim = 一个 sandbox）。
+    core: Mutex<Option<Arc<VmCore>>>,
+    /// VM 退出通知 (stop/shutdown 触发, 喂给 `wait`)。wait=(b): 不观察 fc 自然退出。
+    exit: tokio::sync::watch::Sender<Option<u32>>,
+    exit_rx: tokio::sync::watch::Receiver<Option<u32>>,
+}
+
+impl RealVm {
+    pub fn new(cfg: Arc<Config>) -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        Self {
+            cfg,
+            core: Mutex::new(None),
+            exit: tx,
+            exit_rx: rx,
+        }
+    }
+
+    /// 确保 `VmCore` 已建（用 `args.sandbox_id` 派生 jail_root/meta 等路径）, 返回其 `Arc` 句柄。
+    fn ensure_core(&self, sandbox_id: &str) -> Arc<VmCore> {
+        let mut g = self.core.lock().unwrap();
+        if g.is_none() {
+            *g = Some(Arc::new(VmCore::new(self.cfg.clone(), sandbox_id)));
+        }
+        g.as_ref().unwrap().clone()
+    }
+
+    fn core_clone(&self) -> Option<Arc<VmCore>> {
+        self.core.lock().unwrap().clone()
+    }
+}
+
+/// 从 `(Config, VmCreateArgs)` 构造恢复输入。`netns_path` 缺省时由 `cfg.netns_path(sid)` 派生。
+fn build_restore_inputs(cfg: &Config, args: &VmCreateArgs) -> Result<RestoreInputs, String> {
+    let ty = cfg
+        .get_type(args.type_id)
+        .ok_or_else(|| format!("unknown type_id {}", args.type_id))?;
+    if ty.has_cloud_disk {
+        return Err(format!(
+            "type {} cloud-disk restore not supported in MVP",
+            args.type_id
+        ));
+    }
+    let bundle_dir = cfg.bundle_dir(&ty.bundle);
+    // netns 优先用 containerd 在 bundle config.json 里提供的 sandbox netns（CRI 路径）；
+    // 仅当未给（裸 ctr run / e2e）时回落 cfg.netns_path(sid)。shim 不自建 netns。
+    let netns_path = if args.netns_path.is_empty() {
+        cfg.netns_path(&args.sandbox_id)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        args.netns_path.clone()
+    };
+    let rw_layer_path = if ty.has_rw_layer {
+        Some(cfg.rw_base_dir.join(format!("{}.ext4", args.sandbox_id)))
+    } else {
+        None
+    };
+    Ok(RestoreInputs {
+        bundle_dir,
+        netns_path,
+        rw_layer_path,
+        jailer_uid: cfg.jailer_uid,
+        jailer_gid: cfg.jailer_gid,
+        chroot_base_dir: cfg.chroot_base_dir.clone(),
+        firecracker_bin: cfg.firecracker_bin.clone(),
+        jailer_bin: cfg.jailer_bin.clone(),
+        cloud_disk_dev: None,
+    })
+}
+
+/// `VmCoreState` → `VmState`（Failed 归并到 Stopped）。
+fn map_state(s: VmCoreState) -> VmState {
+    match s {
+        VmCoreState::Running => VmState::Running,
+        VmCoreState::NotExist => VmState::NotExist,
+        VmCoreState::Stopped | VmCoreState::Failed => VmState::Stopped,
+    }
+}
+
+#[async_trait]
+impl SandboxVm for RealVm {
+    async fn create(&self, args: VmCreateArgs) -> Result<(), String> {
+        let inputs = build_restore_inputs(&self.cfg, &args)?;
+        let core = self.ensure_core(&args.sandbox_id);
+        let core2 = core.clone();
+        // 同步 VmCore::create（materialize+jailer+snapshot/load, 可能数秒）放 blocking 池。
+        tokio::task::spawn_blocking(move || core2.create(&inputs))
+            .await
+            .map_err(|e| format!("blocking join: {e}"))?
+            .map(|_handle| ())
+    }
+
+    async fn start(&self) -> Result<VmRunInfo, String> {
+        let core = self.core_clone().ok_or("start: vm not created")?;
+        let (state, pid) = tokio::task::spawn_blocking(move || core.liveness())
+            .await
+            .map_err(|e| format!("blocking join: {e}"))?;
+        if state != VmCoreState::Running {
+            return Err(format!("start: vm not running (state={:?})", state));
+        }
+        Ok(VmRunInfo { pid })
+    }
+
+    async fn status(&self) -> (VmState, u32) {
+        match self.core_clone() {
+            Some(core) => {
+                let (state, pid) = tokio::task::spawn_blocking(move || core.liveness())
+                    .await
+                    .unwrap_or((VmCoreState::NotExist, 0));
+                (map_state(state), pid)
+            }
+            None => (VmState::NotExist, 0),
+        }
+    }
+
+    async fn stop(&self, _timeout_secs: u32) -> Result<(), String> {
+        if let Some(core) = self.core_clone() {
+            tokio::task::spawn_blocking(move || core.cleanup())
+                .await
+                .map_err(|e| format!("blocking join: {e}"))?;
+        }
+        // wait=(b): 唤醒所有 waiter, wait 返回 0。
+        let _ = self.exit.send(Some(0));
+        Ok(())
+    }
+
+    async fn wait(&self) -> u32 {
+        // 不观察 firecracker 自然退出(ADR: wait=(b)); status 是探测 fc 存活的安全阀。
+        let mut rx = self.exit_rx.clone();
+        loop {
+            if let Some(code) = *rx.borrow() {
+                return code;
+            }
+            if rx.changed().await.is_err() {
+                return 0;
+            }
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), String> {
+        // 委托给 stop: shutdown 当前无独立调用方（TaskService::shutdown 不调本方法）。
+        self.stop(0).await
     }
 }

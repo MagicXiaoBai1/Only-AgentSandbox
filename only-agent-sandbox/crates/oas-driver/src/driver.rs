@@ -341,7 +341,10 @@ fn spawn_and_wait(
 }
 
 /// shim 不可达时的应急杀：读 shim.meta → 身份校验 → 杀 firecracker → 清 jail root/socket。
-fn emergency_kill(sandbox_dir: &Path, jail_root: &Path, socket: &Path) -> Result<(), DriverError> {
+///
+/// 公开供 `oas-ctrd-shim` 的 `delete` action（containerd 在 shim 不可达时调二进制做回收）
+/// 复用——Path A 与 Path B 共用同一套确定性资源释放（见 ADR 0009）。
+pub fn emergency_kill(sandbox_dir: &Path, jail_root: &Path, socket: &Path) -> Result<(), DriverError> {
     let meta_path = sandbox_dir.join("shim.meta");
     if let Some(meta) = ShimMeta::read(&meta_path) {
         if crate::identity::verify_fc_pid(meta.fc_pid, &meta) {
@@ -351,7 +354,10 @@ fn emergency_kill(sandbox_dir: &Path, jail_root: &Path, socket: &Path) -> Result
         // 无 meta 但有孤儿 firecracker 命中 jail root → 杀。
         terminate_pid(pid);
     }
-    let _ = std::fs::remove_dir_all(jail_root);
+    // 调试开关：保留 jail root 现场（OAS_DEBUG_KEEP_JAIL=1）便于排查 firecracker 恢复失败。
+    if std::env::var("OAS_DEBUG_KEEP_JAIL").as_deref() != Ok("1") {
+        let _ = std::fs::remove_dir_all(jail_root);
+    }
     let _ = std::fs::remove_file(&meta_path);
     let _ = std::fs::remove_file(socket);
     Ok(())

@@ -1,0 +1,43 @@
+{
+  "name": "k8s-pod-network",
+  "cniVersion": "1.0.0",
+  "plugins": [
+    {
+      "type": "calico",
+      "datastore_type": "kubernetes",
+      "nodename": "__KUBERNETES_NODE_NAME__",
+      "mtu": 1440,
+      "ipam": {
+        "type": "calico-ipam"
+      },
+      "policy": {
+        "type": "k8s"
+      },
+      "kubernetes": {
+        "kubeconfig": "/etc/cni/net.d/calico-kubeconfig"
+      },
+      "container_settings": {
+        "allow_ip_forwarding": true
+      }
+    },
+    {
+      "type": "oas-vm-net",
+      "tapName": "tapH0",
+      "tapAddress": "172.16.0.1/30",
+      "tapMac": "06:00:ac:10:00:01",
+      "tapOwnerUid": 1234,
+      "tapOwnerGid": 1234,
+      "guestAddress": "172.16.0.2/30",
+      "guestMac": "06:00:ac:10:00:02",
+      "ingressTCPPorts": [
+        22
+      ],
+      "controlPlaneCIDRs": [
+        "10.20.0.0/16"
+      ],
+      "capabilities": {
+        "dns": true
+      }
+    }
+  ]
+}
