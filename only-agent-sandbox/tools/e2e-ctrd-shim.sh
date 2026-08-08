@@ -21,6 +21,12 @@
 #   sudo ./tools/e2e-ctrd-shim.sh                # mock 模式（协议级，无需 firecracker）
 #   sudo OAS_VM=real ./tools/e2e-ctrd-shim.sh    # real 模式（需 firecracker/jailer + bundle）
 #   TEST_KEEP=1 sudo OAS_VM=real ./tools/e2e-ctrd-shim.sh   # 保留现场便于排查
+#
+# 启动耗时测量（real 模式）：末尾打印 containerd 就绪 / shim 启动(ctr run→RUNNING) /
+# teardown 三段 wall-clock，并解析 shim 日志（OAS_SHIM_LOG）的 log_step 行给出
+# materialize/jailer_spawn/wait_fc_socket/snapshot_load/… 各阶段毫秒拆分。
+# 前提：shim 已装 tracing 订阅器（run_server::init_tracing）且 action_start 把常驻子进程
+# stderr 重定向到 OAS_SHIM_LOG——否则 log_step 事件被丢弃，拆分段为空。
 set -euo pipefail
 
 KEEP="${TEST_KEEP:-0}"
@@ -87,6 +93,13 @@ count_shim() { sudo pgrep -af "$SHIM_BIN_NAME" 2>/dev/null | grep -v -E '[p]grep
 # real 模式：firecracker 进程数。
 count_fc() { pgrep -a firecracker 2>/dev/null | wc -l || true; }
 
+# ---- 计时（高精度 wall-clock，秒浮点；bash 无浮点算术 → awk）-----------------
+# 测三段：containerd 就绪 / shim 启动(ctr run→RUNNING) / teardown(kill+delete→退出)。
+# real 模式另解析 shim 的 log_step 日志，给出 materialize/jailer/snapshot_load 等阶段拆分。
+now() { date +%s.%N; }
+elapsed() { awk -v a="$1" -v b="$2" 'BEGIN{d=b-a; if(d<0)d=0; printf "%.3f", d}'; }
+T_CD0=""; T_CD1=""; T_RUN0=""; T_RUN1=""; T_TD0=""; T_TD1=""
+
 # ---- 清理 -------------------------------------------------------------------
 cleanup() {
     set +e
@@ -98,6 +111,7 @@ cleanup() {
         echo "  work dir        : $WORK"
         [ -f "$OAS_CFG" ] && echo "  oas config      : $OAS_CFG"
         [ "$MODE" = "real" ] && echo "  netns           : $NETNS ($NETNS_PATH)"
+        [ -f "$SHIM_LOG" ] && echo "  shim log        : $SHIM_LOG"
         [ -f "$CTRD_PID_FILE" ] && echo "  containerd pid  : $(cat "$CTRD_PID_FILE")"
         exit 0
     fi
@@ -249,7 +263,11 @@ step "起隔离 containerd"
 if [ "$MODE" = "mock" ]; then
     CTRD_ENV=(sudo env "PATH=$WORK/opt/bin:$PATH" "OAS_VM=mock")
 else
-    CTRD_ENV=(sudo env "PATH=$WORK/opt/bin:$PATH" "OAS_CONFIG=$OAS_CFG" "RUST_LOG=oas_shim=debug,info")
+    # OAS_SHIM_LOG：常驻 shim 子进程 stderr 重定向到此文件（见 start::shim_stderr），
+    # run_server 安装的 tracing 订阅器把 log_step 各阶段耗时写进来，供末尾解析。
+    # RUST_LOG=info：EnvFilter 全局 info，覆盖 target="oas-shim" 的 log_step(info 级)。
+    CTRD_ENV=(sudo env "PATH=$WORK/opt/bin:$PATH" "OAS_CONFIG=$OAS_CFG" \
+        "OAS_SHIM_LOG=$SHIM_LOG" "RUST_LOG=info")
 fi
 "${CTRD_ENV[@]}" containerd -c "$WORK/config.toml" --address "$SOCK" \
     > "$CTRD_LOG" 2>&1 &
@@ -258,11 +276,13 @@ echo "$CTRD_PID" > "$CTRD_PID_FILE"
 echo "    containerd pid=$CTRD_PID, log=$CTRD_LOG"
 
 # 轮询等 socket 就绪
+T_CD0=$(now)
 ready=0
 for _ in $(seq 1 100); do
     if sudo $CTR version >/dev/null 2>&1; then ready=1; break; fi
     sleep 0.1
 done
+T_CD1=$(now)
 [ "$ready" = "1" ] || { echo "    containerd 启动失败，日志尾部:"; tail -40 "$CTRD_LOG"; die "containerd socket 未就绪"; }
 ok "containerd 就绪: $SOCK"
 
@@ -274,6 +294,7 @@ step "ctr run --rootfs (runtime=$RUNTIME, mode=$MODE)"
 # /bin/true  : 仅填充 OCI spec process.args，RealVm/MockVm 都不会真正 exec 它。
 # 注意：ctr 的 urfave/cli 不支持 flag 与位置参数交错——所有 flag 必须在位置参数之前。
 # real 模式 create 内含 materialize+jailer+snapshot/load，可能数秒；ctr run 会阻塞到 Running。
+T_RUN0=$(now)
 sudo $CTR run -d --runtime "$RUNTIME" --null-io --rootfs "$ROOTFS" "$TASK_ID" /bin/true \
     || {
         echo "    ctr run 失败，containerd 日志尾部:"
@@ -288,6 +309,7 @@ sudo $CTR run -d --runtime "$RUNTIME" --null-io --rootfs "$ROOTFS" "$TASK_ID" /b
         die "ctr run 失败"
     }
 ok "task 已创建并启动: $TASK_ID"
+T_RUN1=$(now)
 
 # 给 containerd 一点时间拉起 shim 并完成 create/start
 for _ in $(seq 1 100); do
@@ -329,6 +351,7 @@ show_shim_procs
 
 # ---- 6. kill + delete -------------------------------------------------------
 step "ctr t kill + delete"
+T_TD0=$(now)
 sudo $CTR t kill "$TASK_ID" || die "ctr t kill 失败"
 ok "kill 完成（stop → cleanup + wake waiters）"
 
@@ -370,6 +393,44 @@ for _ in $(seq 1 50); do
 done
 [ "$shim_after" -eq 0 ] || { show_shim_procs; die "shim 进程未退出（退出门控未触发，残留 $shim_after 个）"; }
 ok "shim 进程已退出（退出门控生效）"
+T_TD1=$(now)
+
+# ---- 8. 启动耗时报告 --------------------------------------------------------
+step "启动耗时报告 (mode=$MODE)"
+cd_ms=$(elapsed "$T_CD0" "$T_CD1")
+run_ms=$(elapsed "$T_RUN0" "$T_RUN1")
+td_ms=$(elapsed "$T_TD0" "$T_TD1")
+printf "    %-26s %8s s\n" "containerd 就绪" "$cd_ms"
+printf "    %-26s %8s s   <-- shim 启动 (ctr run → RUNNING)\n" "shim_startup" "$run_ms"
+printf "    %-26s %8s s\n" "teardown (kill+delete)" "$td_ms"
+
+# real 模式：解析 shim 日志的 log_step 阶段拆分（materialize/jailer/snapshot_load …）。
+if [ "$MODE" = "real" ]; then
+    echo "    -- shim 阶段拆分 (log_step, target=oas-shim, from $SHIM_LOG) --"
+    if [ ! -f "$SHIM_LOG" ]; then
+        echo "      (无 shim 日志：OAS_SHIM_LOG 未生效或 shim 未装订阅器)"
+    else
+        # || true 防 set -e+pipefail 在 grep 无匹配(返回1)时直接退出脚本。
+        parsed="$( { grep -oE 'step=[^ ]+ elapsed_ms=[0-9]+' "$SHIM_LOG" 2>/dev/null || true; } \
+                    | sed 's/step=//; s/ elapsed_ms=/ /')"
+        if [ -z "$parsed" ]; then
+            echo "      (未解析到 step=/elapsed_ms= 行，shim 日志原文前 20 行：)"
+            sed -n '1,20p' "$SHIM_LOG" 2>/dev/null | sed 's/^/        /'
+        else
+            printf "      %-22s %10s\n" "阶段" "ms"
+            while read -r nm ms; do
+                [ -n "$nm" ] || continue
+                printf "      %-22s %10s\n" "$nm" "$ms"
+            done <<< "$parsed"
+            # wall-clock 与 fresh_restore_total 的差 ≈ containerd task RPC + start liveness 开销。
+            fr_total="$(awk '$1=="fresh_restore_total"{print $2}' <<<"$parsed")"
+            if [ -n "$fr_total" ]; then
+                overhead_ms=$(awk -v w="$run_ms" -v f="$fr_total" 'BEGIN{printf "%.0f", w*1000-f}')
+                printf "      %-22s %10s\n" "RPC+liveness 开销(估)" "$overhead_ms"
+            fi
+        fi
+    fi
+fi
 
 echo ""
 if [ "$MODE" = "mock" ]; then

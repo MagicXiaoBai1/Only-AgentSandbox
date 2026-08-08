@@ -23,6 +23,10 @@ protobuf                 = "3"
 nix                      = { version = "0.29", features = ["process", "signal", "user", "fs", "sched", "mount"] }
 anyhow                   = "1"
 log                      = "0.4"
+# tracing 事件经 oas-driver 的 log_step 发出 (target="oas-shim")。本进程安装订阅器
+# 才能让它们落到文件 (默认 stderr)；否则 tracing "log" feature 回落到无 logger → 丢弃。
+tracing                  = { version = "0.1", features = ["log"] }
+tracing-subscriber       = { version = "0.3", features = ["env-filter"] }
 serde                    = { workspace = true }
 serde_json               = { workspace = true }
 # 复用现有 crate

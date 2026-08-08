@@ -75,7 +75,9 @@ pub fn action_start(flags: &Flags, grouping: &str) -> Result<(), Box<dyn std::er
         .arg("run")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        // stderr 默认 /dev/null；若设了 OAS_SHIM_LOG，重定向到该文件，使常驻子进程内
+        // run_server 安装的 tracing 订阅器输出（含 log_step 各阶段耗时）落到磁盘供脚本解析。
+        .stderr(shim_stderr()?);
 
     // 透传 containerd 的 TTRPC_ADDRESS/GRPC_ADDRESS (事件发布用, P1 未用到但保留)。
     for key in ["TTRPC_ADDRESS", "GRPC_ADDRESS"] {
@@ -108,6 +110,23 @@ pub fn action_start(flags: &Flags, grouping: &str) -> Result<(), Box<dyn std::er
     stdout.flush()?;
 
     Ok(())
+}
+
+/// 常驻 run 子进程的 stderr 目标：设了 `OAS_SHIM_LOG` 则截断写该文件（供脚本解析
+/// `log_step` 各阶段耗时），否则 `/dev/null`。
+fn shim_stderr() -> Result<Stdio, Box<dyn std::error::Error>> {
+    match std::env::var("OAS_SHIM_LOG") {
+        Ok(p) if !p.is_empty() => {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&p)
+                .map_err(|e| format!("open OAS_SHIM_LOG {p}: {e}"))?;
+            Ok(Stdio::from(f))
+        }
+        _ => Ok(Stdio::null()),
+    }
 }
 
 /// 子进程就绪握手: socket 已 bind + serve 就绪后, 把地址写到 stdout、flush,

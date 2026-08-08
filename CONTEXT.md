@@ -14,6 +14,14 @@
 - **身份校验（防 PID 复用）**：以 **mount namespace inode** 为锚点（jailer chroot 必建独立 mntns，netns 不可靠）。shim 在 create 完成时写 `$ROOT/shim.meta`（`fc_pid`/`mntns_inode`/`started_at`/`shim_pid`）；re-attach/应急杀前读候选 pid，`kill(pid,0)` + `/proc/<pid>/ns/mnt` inode 比对 `shim.meta` 双校验。PID 复用的进程在另一 mntns，inode 不命中。
 - **应急杀路径（deterministic resource release）**：`Stop`/`delete_vm` 先试 shim ttrpc Stop；shim 不可达时 runtime 直读 `$ROOT/shim.meta` + `firecracker.pid`，过身份校验后杀 firecracker、清 jail root、删 socket。杀前必校验，防杀错进程。
 
+## 部署路径与 Shim 二进制
+
+存在**两个不同的 Shim 二进制**，分接两条互斥的顶层路径，二者**不嵌套、不互相驱动**：
+
+- **Runtime-driven Shim（Path A，`oas-driver::shim::ShimImpl`）**：kubelet → `oas-runtime`(CRI server) → Shim 守护进程，走自定义 ttrpc 契约 `Create`/`State`/`Stop`（见上「Shim API」）。即上文「Shim」词条所指。
+- **containerd-driven Shim（Path B，`oas-ctrd-shim`）**：kubelet → containerd(CRI) → `containerd-shim-oas-v2` 守护进程，走 containerd v2 Task/Sandbox 协议。不经 `oas-runtime`，不被 `RealDriver` 驱动。
+- **Restore Core（`vm_core`，待提取）**：两条路径**共享的**进程无关恢复原语——materialize / jailer+firecracker 拉起 / snapshot-load+resume / re-attach / cleanup / `find_fc_pid` / mntns 身份校验。既非 ttrpc server 也非状态机，仅是 VM bring-up 原语集。Path A 的 `ShimImpl` 与 Path B 的 `RealVm` 各自把它包成自己的对外接口（ttrpc `Create/State/Stop` vs `SandboxVm` trait）。当前这批逻辑仍内联在 `oas-driver/src/shim.rs`，尚未抽成独立模块。
+
 ## 恢复（Restore）
 
 - **Materialize（物化）**：把 per-VM 可写 ext4 / 云盘拷进 jail root 的固定 jail 内路径（如 `/data.ext4`），让 snapshot 记录的盘路径在新 jail 里仍然命中——而非用 Firecracker drive path override（API 不支持）。
@@ -21,3 +29,7 @@
 - **配置加载**：`Config::Default`（MVP 硬编码）+ `Config::load(path)`（TOML 文件在则读、否则 Default）为扩展性接缝；runtime `--config <path>` 并把同一 `--config` 透传给 shim，两边读同一份单一事实源。
 - **网络模型（MVP）**：每沙箱独立 netns；oas-net 在其中建固定名 tap（约定 `tap0`）+ 网关 IP。bundle 烘焙时 `PUT /network-interfaces/net1` 挂 virtio-net（`iface_id:"net1"`、固定 `guest_mac`、`host_dev_name`=固定 tap 名）。restore 时 jailer `--netns <netns_path>` 让 firecracker 进 netns，firecracker 自动开同名 tap——**不用 `network_overrides`**（netns 隔离使固定 tap 名天然每沙箱唯一；override 留给未来 CNI 改名）。guest 静态 IP（MVP 全沙箱相同，如 `172.16.0.2/30`、网关 `172.16.0.1`），SSH 经 `ip netns exec <netns> ssh <guest_ip>`。NAT/出网留后期。
 - **网络接口（向前兼容 CNI）**：`create_vm` 的 `netns_path: &str` 升级为网络 spec `{ netns_path, tap_name }`（manager 已有 `net_cfg.tap_name`，原先漏传）。MVP 中 `tap_name` 恒为固定常量、shim 不用于 override；CNI 落地时改 shim 实现即可，proto 不动。
+- **L2 桥接（tc-redirect / mirred）**：tap **无 IP**，guest 直接持有 PodIP；`mirred egress redirect` 在 qdisc ingress 层 `TC_ACT_STOLEN` 窃包，绕过 netfilter。kata `tcfilter` 即此模型，要求 guest 侧有通道（vsock+agent）获知 PodIP。
+- **L3 NAT 数据面**：tap 持网关 IP（`172.16.0.1/30`），guest 固定 IP（`172.16.0.2/30`），netfilter `prerouting` DNAT PodIP→guestIP、`postrouting` SNAT guestIP→PodIP。guest **无需知晓 PodIP**。OAS 采纳的模型。
+- **数据面互斥性**：tap 有 IP（可路由 + NAT）与 tap 无 IP（L2 redirect）是同一轴的两端，**不可在同一 tap 上叠加**——`mirred` 在 qdisc 层窃包，早于 netfilter NAT 链，会让 NAT 永不触发。选 NAT 还是 tc-redirect，由「guest 是否需要知晓 PodIP」一题决定。
+- **tapH0 归属（Path B）**：由 `oas-ctrd-shim` 在 jailer spawn 前、于 pod netns 内创建 tapH0 并安装 NAT（shell out `ip netns exec` + `nft`）；Calico 作纯 CNI 只产 `eth0`(PodIP/32)。`oas-vm-net` CNI 插件保留不用、不删除。解 ADR-0010 遗留的 tap 归属问题。

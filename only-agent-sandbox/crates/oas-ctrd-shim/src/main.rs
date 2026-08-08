@@ -102,6 +102,14 @@ fn main() {
 
 /// 常驻 server: bind socket + serve Sandbox(+Task), 阻塞至 ShutdownSandbox.
 fn run_server(socket_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // 安装 tracing 订阅器：oas-driver 的 log_step (target="oas-shim") 各阶段耗时经此落到
+    // stderr。常驻 run 子进程的 stderr 由 action_start 重定向到 OAS_SHIM_LOG 文件（若未设
+    // 则 /dev/null）。EnvFilter 读 RUST_LOG；未设时回落 info（含 log_step 的 info 级）。
+    init_tracing();
+    // 诊断探针：与 log_step 同形。走 stderr(=OAS_SHIM_LOG 文件)，不污染 stdout 握手。
+    // 若它在日志里出现 → 订阅器写文件成功；log_step 也应出现，否则问题在 create 调用链。
+    tracing::info!(target: "oas-shim", sid = "boot", step = "tracing_probe", elapsed_ms = 0u64, "restore step");
+
     let cfg = Arc::new(load_config());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -121,6 +129,24 @@ fn run_server(socket_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         server.shutdown().await.ok();
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+/// 安装 tracing fmt 订阅器（写 stderr，由 action_start 重定向到 OAS_SHIM_LOG 文件）。
+///
+/// oas-driver `vm_core::log_step` 用 `tracing::info!(target="oas-shim", step=.., elapsed_ms=..)`
+/// 标注恢复各阶段耗时；本进程不装订阅器时这些事件经 tracing "log" feature 回落到 `log` crate，
+/// 而 shim 又未注册 `log` logger → 全部丢弃。装上订阅器后事件直接进订阅器（不再回落）。
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // 默认 writer 是 stdout——会污染 containerd Legacy start 握手（stdout 读 socket 地址），
+    // 且 signal_ready 后 stdout→/dev/null 会丢失 create/start 期间的 log_step 事件。
+    // 显式写 stderr：action_start 已把常驻子进程 stderr 重定向到 OAS_SHIM_LOG 文件。
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 /// 解析配置: `OAS_CONFIG` 环境变量 → `/etc/oas/config.toml` → `Config::default()`。

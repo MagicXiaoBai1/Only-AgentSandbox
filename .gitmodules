@@ -1,3 +1,6 @@
 [submodule "containerd"]
 	path = containerd
 	url = https://github.com/containerd/containerd.git
+[submodule "kata-containers"]
+	path = kata-containers
+	url = https://github.com/kata-containers/kata-containers.git
