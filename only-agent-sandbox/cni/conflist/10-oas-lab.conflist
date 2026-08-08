@@ -1,0 +1,26 @@
+{
+  "name": "oas-lab",
+  "cniVersion": "1.0.0",
+  "plugins": [
+    {
+      "type": "loopback"
+    },
+    {
+      "type": "ptp",
+      "ipam": {
+        "type": "host-local",
+        "subnet": "10.244.99.0/24",
+        "routes": [
+          { "dst": "0.0.0.0/0" }
+        ]
+      },
+      "mtu": 1500
+    },
+    {
+      "type": "oas-vm-net",
+      "tapName": "tapH0",
+      "tapGateway": "172.16.0.1/30",
+      "guestIP": "172.16.0.2"
+    }
+  ]
+}

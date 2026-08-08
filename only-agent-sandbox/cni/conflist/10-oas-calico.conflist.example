@@ -1,0 +1,29 @@
+{
+  "name": "oas-calico",
+  "cniVersion": "1.0.0",
+  "plugins": [
+    {
+      "type": "calico",
+      "log_level": "info",
+      "datastore_type": "kubernetes",
+      "nodename": "__NODENAME__",
+      "mtu": 0,
+      "ipam": {
+        "type": "calico-ipam"
+      },
+      "policy": {
+        "type": "k8s"
+      },
+      "kubernetes": {
+        "kubeconfig": "/etc/rancher/k3s/k3s.yaml"
+      }
+    },
+    {
+      "type": "oas-vm-net",
+      "tapName": "tapH0",
+      "tapGateway": "172.16.0.1/30",
+      "guestIP": "172.16.0.2",
+      "dnsServer": "10.43.0.10"
+    }
+  ]
+}

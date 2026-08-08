@@ -1,0 +1,35 @@
+# Standalone Calico-track OAS config (lab CNI). Uses alternate socket — does NOT replace /run/oas.sock.
+firecracker_bin = "/home/yunfei/workspace/snap_double_shot/bin/firecracker"
+jailer_bin = "/home/yunfei/workspace/snap_double_shot/bin/jailer"
+chroot_base_dir = "/home/yunfei/oas-test-calico"
+jailer_uid = 1234
+jailer_gid = 1234
+artifacts_dir = "/var/lib/oas/artifacts"
+run_base_dir = "/run/oas-calico"
+log_dir = "/var/log/oas-calico"
+store_path = "/var/lib/oas/store-calico.redb"
+cri_socket = "/run/oas-calico.sock"
+rw_base_dir = "/var/lib/oas/rw-calico"
+rw_size_mib = 1024
+
+[net]
+mode = "cni"
+tap_name = "tapH0"
+tap_gateway = "172.16.0.1"
+tap_prefix = 30
+guest_ip = "172.16.0.2"
+guest_mac = "06:00:AC:10:00:02"
+pod_cidr = "10.244.99.0/24"
+pod_gateway = "10.244.99.1"
+cni_conflist = "/home/zjj/modify_firecracker/Only-AgentSandbox_Calico/only-agent-sandbox/cni/conflist/10-oas-lab.conflist"
+cni_bin_dir = "/opt/cni/bin"
+cni_invoke = "/opt/cni/bin/oas-cni-invoke"
+
+[[types]]
+type_id = 3
+bundle = "base-1-agent"
+vcpu = 2
+mem_mib = 1024
+has_rw_layer = true
+has_cloud_disk = false
+image_whitelist = ["img-agent"]

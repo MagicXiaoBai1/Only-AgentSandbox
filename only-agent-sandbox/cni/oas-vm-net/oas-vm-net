@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# oas-vm-net — CNI chained plugin (bash).
+# After Calico/ptp places Pod IP P on eth0, create fixed tap + G↔P 1:1 NAT.
+set -euo pipefail
+
+TAP_NAME_DEFAULT=tapH0
+TAP_GW_DEFAULT=172.16.0.1/30
+GUEST_IP_DEFAULT=172.16.0.2
+NFT_TABLE=oas_vm
+
+log() { echo "oas-vm-net: $*" >&2; }
+
+stdin=$(cat || true)
+cmd=${CNI_COMMAND:-}
+
+cfg_field() {
+  local j="$1" key="$2" default="$3"
+  python3 -c '
+import json,sys
+d=json.loads(sys.argv[1])
+v=d.get(sys.argv[2])
+print(v if v not in (None,"") else sys.argv[3])
+' "$j" "$key" "$default"
+}
+
+pod_ip_from_prev() {
+  python3 -c '
+import json,sys
+d=json.loads(sys.argv[1])
+prev=d.get("prevResult") or {}
+for ip in prev.get("ips") or []:
+    a=ip.get("address","")
+    if a and ":" not in a.split("/")[0]:
+        print(a.split("/")[0]); raise SystemExit(0)
+for ip in d.get("ips") or []:
+    a=ip.get("address","")
+    if a and ":" not in a.split("/")[0]:
+        print(a.split("/")[0]); raise SystemExit(0)
+raise SystemExit("oas-vm-net: no IPv4 in prevResult")
+' "$1"
+}
+
+ns_exec() {
+  # CNI_NETNS is a path; ip netns exec wants the name under /var/run/netns
+  local ns_path="$1"; shift
+  local name
+  name=$(basename "$ns_path")
+  ip netns exec "$name" "$@"
+}
+
+setup_nat_in_ns() {
+  local ns_path="$1" pod_ip="$2" guest_ip="$3" tap_gw_ip="$4" tap="$5" dns="${6:-}"
+  ns_exec "$ns_path" nft delete table ip "$NFT_TABLE" 2>/dev/null || true
+  local script
+  # Ingress: DNAT P→G, then SNAT src→T on tap so guest (only knows /30) can reply.
+  # Egress: SNAT G→P toward eth0 / Calico.
+  script=$(cat <<EOF
+add table ip ${NFT_TABLE}
+add chain ip ${NFT_TABLE} prerouting { type nat hook prerouting priority dstnat; policy accept; }
+add chain ip ${NFT_TABLE} postrouting { type nat hook postrouting priority srcnat; policy accept; }
+add chain ip ${NFT_TABLE} forward { type filter hook forward priority filter; policy accept; }
+add rule ip ${NFT_TABLE} prerouting ip daddr ${pod_ip} counter dnat to ${guest_ip}
+add rule ip ${NFT_TABLE} postrouting oifname "${tap}" ip daddr ${guest_ip} counter snat to ${tap_gw_ip}
+add rule ip ${NFT_TABLE} postrouting ip saddr ${guest_ip} counter snat to ${pod_ip}
+add rule ip ${NFT_TABLE} forward ct state established,related accept
+add rule ip ${NFT_TABLE} forward ip saddr ${guest_ip} accept
+add rule ip ${NFT_TABLE} forward ip daddr ${guest_ip} accept
+EOF
+)
+  if [[ -n "$dns" ]]; then
+    script+=$'\n'"add rule ip ${NFT_TABLE} prerouting ip daddr ${tap_gw_ip} udp dport 53 counter dnat to ${dns}:53"
+    script+=$'\n'"add rule ip ${NFT_TABLE} prerouting ip daddr ${tap_gw_ip} tcp dport 53 counter dnat to ${dns}:53"
+  fi
+  ns_exec "$ns_path" nft -f - <<<"$script"
+}
+
+ensure_tap_in_ns() {
+  local ns_path="$1" tap="$2" gw_cidr="$3"
+  if ! ns_exec "$ns_path" ip link show "$tap" &>/dev/null; then
+    ns_exec "$ns_path" ip tuntap add dev "$tap" mode tap
+  fi
+  local gw_ip=${gw_cidr%%/*}
+  if ! ns_exec "$ns_path" ip -4 addr show dev "$tap" | grep -q "$gw_ip"; then
+    ns_exec "$ns_path" ip addr add "$gw_cidr" dev "$tap" 2>/dev/null || true
+  fi
+  ns_exec "$ns_path" ip link set "$tap" up
+  ns_exec "$ns_path" bash -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+}
+
+cmd_add() {
+  local tap gw guest dns pod_ip tap_gw_ip
+  tap=$(cfg_field "$stdin" tapName "$TAP_NAME_DEFAULT")
+  gw=$(cfg_field "$stdin" tapGateway "$TAP_GW_DEFAULT")
+  guest=$(cfg_field "$stdin" guestIP "$GUEST_IP_DEFAULT")
+  dns=$(cfg_field "$stdin" dnsServer "")
+  pod_ip=$(pod_ip_from_prev "$stdin")
+  tap_gw_ip=${gw%%/*}
+
+  [[ -n "${CNI_NETNS:-}" ]] || { log "CNI_NETNS required"; exit 1; }
+
+  ensure_tap_in_ns "$CNI_NETNS" "$tap" "$gw"
+  setup_nat_in_ns "$CNI_NETNS" "$pod_ip" "$guest" "$tap_gw_ip" "$tap" "$dns"
+
+  python3 -c '
+import json,sys
+d=json.loads(sys.argv[1])
+prev=d.get("prevResult")
+json.dump(prev if prev is not None else d, sys.stdout)
+print()
+' "$stdin"
+}
+
+cmd_del() {
+  local tap
+  tap=$(cfg_field "$stdin" tapName "$TAP_NAME_DEFAULT" 2>/dev/null || echo "$TAP_NAME_DEFAULT")
+  [[ -n "${CNI_NETNS:-}" ]] || exit 0
+  ns_exec "$CNI_NETNS" nft delete table ip "$NFT_TABLE" 2>/dev/null || true
+  ns_exec "$CNI_NETNS" ip link del "$tap" 2>/dev/null || true
+  exit 0
+}
+
+cmd_check() {
+  local tap
+  tap=$(cfg_field "$stdin" tapName "$TAP_NAME_DEFAULT")
+  pod_ip_from_prev "$stdin" >/dev/null
+  [[ -n "${CNI_NETNS:-}" ]] || exit 1
+  ns_exec "$CNI_NETNS" ip link show "$tap" >/dev/null
+  ns_exec "$CNI_NETNS" nft list table ip "$NFT_TABLE" >/dev/null
+  exit 0
+}
+
+cmd_version() {
+  cat <<'EOF'
+{
+  "cniVersion": "1.0.0",
+  "supportedVersions": ["0.3.1", "0.4.0", "1.0.0"]
+}
+EOF
+}
+
+case "$cmd" in
+  ADD) cmd_add ;;
+  DEL) cmd_del ;;
+  CHECK) cmd_check ;;
+  VERSION) cmd_version ;;
+  *) log "unknown CNI_COMMAND=$cmd"; exit 1 ;;
+esac

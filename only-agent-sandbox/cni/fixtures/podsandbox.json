@@ -1,0 +1,20 @@
+{
+  "metadata": {
+    "name": "calico-cni-smoke",
+    "namespace": "default",
+    "uid": "uid-calico-cni-smoke",
+    "attempt": 1
+  },
+  "hostname": "calico-cni-smoke",
+  "log_directory": "/tmp",
+  "annotations": {
+    "agent-sandbox/type": "3"
+  },
+  "linux": {
+    "security_context": {
+      "namespace_options": {
+        "network": 0
+      }
+    }
+  }
+}

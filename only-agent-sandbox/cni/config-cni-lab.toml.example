@@ -1,0 +1,15 @@
+# 片段示例：合并进 OAS --config TOML，启用 CNI A1（lab conflist）
+# 其余 firecracker/jailer 路径请按本机覆盖。
+
+[net]
+mode = "cni"
+tap_name = "tapH0"
+tap_gateway = "172.16.0.1"
+tap_prefix = 30
+guest_ip = "172.16.0.2"
+guest_mac = "06:00:AC:10:00:02"
+pod_cidr = "10.244.99.0/24"
+pod_gateway = "10.244.99.1"
+cni_conflist = "/home/zjj/modify_firecracker/Only-AgentSandbox_Calico/only-agent-sandbox/cni/conflist/10-oas-lab.conflist"
+cni_bin_dir = "/opt/cni/bin"
+cni_invoke = "/opt/cni/bin/oas-cni-invoke"
