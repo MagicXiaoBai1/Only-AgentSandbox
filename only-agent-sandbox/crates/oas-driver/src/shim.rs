@@ -15,16 +15,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use nix::unistd::{chown, Gid, Uid};
-use oas_config::Config;
+use nix::unistd::{Gid, Uid, chown};
+use oas_config::{Config, copy_file_with_reflink};
 use ttrpc::Server;
 
 use crate::firecracker::FirecrackerClient;
 use crate::generated::shim::{
     CreateRequest, CreateResponse, StateRequest, StateResponse, StopRequest, StopResponse,
 };
-use crate::generated::shim_ttrpc::{create_shim, Shim};
-use crate::identity::{find_fc_pid, mntns_inode, pid_alive, terminate_pid, ShimMeta};
+use crate::generated::shim_ttrpc::{Shim, create_shim};
+use crate::identity::{ShimMeta, find_fc_pid, mntns_inode, pid_alive, terminate_pid};
+
+const WRITABLE_ROOTFS_MARKER: &str = "rootfs.writable";
 
 /// shim 启动参数（由 main.rs 解析 clap 后构造）。
 pub struct ShimArgs {
@@ -100,9 +102,7 @@ pub fn run(args: ShimArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let methods = create_shim(impl_.clone() as Arc<dyn Shim + Send + Sync>);
     let sockaddr = format!("unix://{}", args.socket.display());
-    let mut server = Server::new()
-        .bind(&sockaddr)?
-        .register_service(methods);
+    let mut server = Server::new().bind(&sockaddr)?.register_service(methods);
     server.start()?;
 
     tracing::info!(target: "oas-shim", sid = %args.sandbox_id, "shim serving, waiting for Create");
@@ -152,14 +152,32 @@ impl ShimImpl {
             return Err("cloud disk restore not supported in MVP".into());
         }
         let bundle = Path::new(&req.bundle_dir);
+        let rootfs_writable = bundle.join(WRITABLE_ROOTFS_MARKER).is_file();
         // materialize 进 jail root 固定路径。
         std::fs::create_dir_all(&self.jail_root).map_err(|e| format!("mkdir jail root: {e}"))?;
-        copy_file(bundle.join("vmlinux"), self.jail_root.join("vmlinux"))?;
-        copy_file(bundle.join("rootfs.ext4"), self.jail_root.join("rootfs.ext4"))?;
-        copy_file(bundle.join("vmstate"), self.jail_root.join("vmstate.src"))?;
-        copy_file(bundle.join("mem"), self.jail_root.join("mem.src"))?;
+        copy_file(
+            &self.cfg,
+            bundle.join("vmlinux"),
+            self.jail_root.join("vmlinux"),
+        )?;
+        copy_file(
+            &self.cfg,
+            bundle.join("rootfs.ext4"),
+            self.jail_root.join("rootfs.ext4"),
+        )?;
+        copy_file(
+            &self.cfg,
+            bundle.join("vmstate"),
+            self.jail_root.join("vmstate.src"),
+        )?;
+        copy_file(
+            &self.cfg,
+            bundle.join("mem"),
+            self.jail_root.join("mem.src"),
+        )?;
         if !req.rw_layer_path.is_empty() {
             copy_file(
+                &self.cfg,
                 Path::new(&req.rw_layer_path),
                 self.jail_root.join("data.ext4"),
             )?;
@@ -167,11 +185,20 @@ impl ShimImpl {
         // chown + chmod（跟随实验：0700 dir / 0444 ro / 0666 rw）。
         chmod(&self.jail_root, 0o0700);
         chown_path(&self.jail_root, req.jailer_uid, req.jailer_gid);
-        for name in ["vmlinux", "rootfs.ext4", "vmstate.src", "mem.src"] {
+        for name in ["vmlinux", "vmstate.src", "mem.src"] {
             let p = self.jail_root.join(name);
             chmod(&p, 0o0444);
             chown_path(&p, req.jailer_uid, req.jailer_gid);
         }
+        let rootfs = self.jail_root.join("rootfs.ext4");
+        chmod(&rootfs, rootfs_mode(bundle));
+        chown_path(&rootfs, req.jailer_uid, req.jailer_gid);
+        tracing::debug!(
+            target: "oas-shim",
+            rootfs_writable,
+            rootfs = %rootfs.display(),
+            "configured per-sandbox rootfs access"
+        );
         if !req.rw_layer_path.is_empty() {
             let p = self.jail_root.join("data.ext4");
             chmod(&p, 0o0666);
@@ -202,9 +229,7 @@ impl ShimImpl {
             .arg(format!("fc-{}.log", self.sandbox_id))
             .arg("--level")
             .arg("Debug");
-        let output = j
-            .output()
-            .map_err(|e| format!("spawn jailer: {e}"))?;
+        let output = j.output().map_err(|e| format!("spawn jailer: {e}"))?;
         if !output.status.success() {
             return Err(format!(
                 "jailer exited {:?}: {}",
@@ -330,7 +355,11 @@ impl Shim for ShimImpl {
         }
     }
 
-    fn state(&self, _ctx: &ttrpc::TtrpcContext, _req: StateRequest) -> ttrpc::Result<StateResponse> {
+    fn state(
+        &self,
+        _ctx: &ttrpc::TtrpcContext,
+        _req: StateRequest,
+    ) -> ttrpc::Result<StateResponse> {
         let st = self.state.lock().unwrap();
         let mut life = st.lifecycle;
         // 若 fc 曾在但已死，反映 Stopped。
@@ -356,11 +385,33 @@ impl Shim for ShimImpl {
 
 // ---- 辅助 ------------------------------------------------------------------
 
-fn copy_file(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<(), String> {
+fn copy_file(cfg: &Config, src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<(), String> {
     let src = src.as_ref();
     let dst = dst.as_ref();
-    std::fs::copy(src, dst).map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    let method = copy_file_with_reflink(src, dst, cfg.reflink_enabled, cfg.reflink_required)
+        .map_err(|e| {
+            format!(
+                "reflink materialize {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            )
+        })?;
+    tracing::debug!(
+        target: "oas-shim",
+        source = %src.display(),
+        destination = %dst.display(),
+        ?method,
+        "materialized immutable artifact"
+    );
     Ok(())
+}
+
+fn rootfs_mode(bundle: &Path) -> u32 {
+    if bundle.join(WRITABLE_ROOTFS_MARKER).is_file() {
+        0o0666
+    } else {
+        0o0444
+    }
 }
 
 fn chmod(path: &Path, mode: u32) {
@@ -369,4 +420,24 @@ fn chmod(path: &Path, mode: u32) {
 
 fn chown_path(path: &Path, uid: u32, gid: u32) {
     let _ = chown(path, Some(Uid::from(uid)), Some(Gid::from(gid)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rootfs_mode;
+    use std::fs;
+
+    #[test]
+    fn writable_marker_only_changes_the_instance_rootfs_mode() {
+        let bundle =
+            std::env::temp_dir().join(format!("oas-rootfs-mode-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&bundle);
+        fs::create_dir_all(&bundle).unwrap();
+
+        assert_eq!(rootfs_mode(&bundle), 0o0444);
+        fs::write(bundle.join("rootfs.writable"), []).unwrap();
+        assert_eq!(rootfs_mode(&bundle), 0o0666);
+
+        fs::remove_dir_all(bundle).unwrap();
+    }
 }

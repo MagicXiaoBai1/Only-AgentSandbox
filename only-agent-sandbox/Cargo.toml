@@ -40,6 +40,7 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 redb = "4.1"
 serde_json = "1"
+libc = "0.2"
 
 # 本地补丁：放宽 h2 server 的 :authority 校验，使 grpc-go（crictl/kubelet）经
 # Unix socket 调用时不被 PROTOCOL_ERROR 重置（grpc-go 把 socket 路径当 :authority）。

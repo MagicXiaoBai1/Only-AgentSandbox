@@ -7,6 +7,9 @@
 //! 故意不含实现细节（如何 spawn jailer / 如何调 firecracker API），只持有路径、uid/gid、
 //! 类型表等静态配置。
 
+use std::fs::OpenOptions;
+use std::io;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,15 +82,38 @@ pub struct Config {
     pub rw_base_dir: PathBuf,
     /// rw 层默认大小（MiB）。
     pub rw_size_mib: u64,
+    /// 是否在运行时使用 Linux FICLONE（XFS/btrfs reflink）复制 immutable 产物。
+    #[serde(default = "default_reflink_enabled")]
+    pub reflink_enabled: bool,
+    /// reflink 失败时是否拒绝回退普通复制；生产 OAS 默认必须为 true。
+    #[serde(default = "default_reflink_required")]
+    pub reflink_required: bool,
+    /// 预格式化的 ext4 rw 模板。每个 sandbox 通过 reflink 从此模板派生独立写层。
+    #[serde(default = "default_rw_template_path")]
+    pub rw_template_path: Option<PathBuf>,
 
     pub net: NetConfig,
     pub types: Vec<SandboxType>,
 }
 
+fn default_reflink_enabled() -> bool {
+    true
+}
+
+fn default_reflink_required() -> bool {
+    true
+}
+
+fn default_rw_template_path() -> Option<PathBuf> {
+    Some(PathBuf::from("/var/lib/oas/artifacts/rw-template.ext4"))
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            firecracker_bin: PathBuf::from("/home/yunfei/workspace/snap_double_shot/bin/firecracker"),
+            firecracker_bin: PathBuf::from(
+                "/home/yunfei/workspace/snap_double_shot/bin/firecracker",
+            ),
             jailer_bin: PathBuf::from("/home/yunfei/workspace/snap_double_shot/bin/jailer"),
             chroot_base_dir: PathBuf::from("/home/yunfei/oas-test"),
             jailer_uid: 1234,
@@ -99,6 +125,9 @@ impl Default for Config {
             cri_socket: PathBuf::from("/run/oas.sock"),
             rw_base_dir: PathBuf::from("/var/lib/oas/rw"),
             rw_size_mib: 1024,
+            reflink_enabled: true,
+            reflink_required: true,
+            rw_template_path: default_rw_template_path(),
             net: NetConfig {
                 tap_name: "tapH0".into(),
                 tap_gateway: "172.16.0.1".into(),
@@ -141,6 +170,89 @@ impl Default for Config {
     }
 }
 
+/// Linux FICLONE ioctl。XFS/btrfs 会共享未修改的物理块，写入时由文件系统执行 CoW。
+const FICLONE: libc::c_ulong = 0x4004_9409;
+
+/// 复制 immutable 产物：优先使用内核 reflink，按配置决定是否允许普通复制回退。
+///
+/// 该函数不调用 shell，也不依赖 `cp`，因此 shim/storage 两条路径使用完全相同的
+/// FICLONE 语义。目标文件可以已存在，成功后保持源文件内容不变。
+pub fn copy_file_with_reflink(
+    src: &Path,
+    dst: &Path,
+    reflink_enabled: bool,
+    reflink_required: bool,
+) -> io::Result<CopyMethod> {
+    if !reflink_enabled {
+        std::fs::copy(src, dst)?;
+        return Ok(CopyMethod::Ordinary);
+    }
+
+    let source = OpenOptions::new().read(true).open(src)?;
+    let target = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(dst)?;
+    let rc = unsafe { libc::ioctl(target.as_raw_fd(), FICLONE, source.as_raw_fd()) };
+    if rc == 0 {
+        return Ok(CopyMethod::Reflink);
+    }
+
+    let err = io::Error::last_os_error();
+    drop(target);
+    let _ = std::fs::remove_file(dst);
+    if reflink_required {
+        return Err(io::Error::new(
+            err.kind(),
+            format!("FICLONE {src:?} -> {dst:?} failed: {err}"),
+        ));
+    }
+
+    std::fs::copy(src, dst)?;
+    Ok(CopyMethod::Ordinary)
+}
+
+/// 复制路径的实际策略，供日志和验收脚本确认没有静默回退。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyMethod {
+    Reflink,
+    Ordinary,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CopyMethod, copy_file_with_reflink};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn test_path(name: &str) -> PathBuf {
+        let root = std::env::var_os("OAS_TEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        root.join(format!("oas-reflink-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn copy_preserves_content_and_isolates_writes() {
+        let src = test_path("src");
+        let dst = test_path("dst");
+        let original = vec![0x5a_u8; 1024 * 1024];
+        fs::write(&src, &original).unwrap();
+
+        let method = copy_file_with_reflink(&src, &dst, true, false).unwrap();
+        assert!(matches!(method, CopyMethod::Reflink | CopyMethod::Ordinary));
+        eprintln!("reflink unit-test copy method: {method:?}");
+        assert_eq!(fs::read(&dst).unwrap(), original);
+
+        fs::write(&dst, vec![0xa5_u8; 4096]).unwrap();
+        assert_eq!(fs::read(&src).unwrap(), original);
+
+        let _ = fs::remove_file(src);
+        let _ = fs::remove_file(dst);
+    }
+}
+
 impl Config {
     /// 从 TOML 文件加载；文件不存在或解析失败 → 回落 `Default`（MVP 容错）。
     pub fn load(path: &Path) -> Self {
@@ -165,9 +277,7 @@ impl Config {
 
     /// `$chroot_base_dir/firecracker/<sid>/`（shim.meta、jail root 的父目录）。
     pub fn sandbox_dir(&self, sandbox_id: &str) -> PathBuf {
-        self.chroot_base_dir
-            .join("firecracker")
-            .join(sandbox_id)
+        self.chroot_base_dir.join("firecracker").join(sandbox_id)
     }
 
     /// `$run_base_dir/oas-shim-<sid>.sock`（ttrpc socket）。

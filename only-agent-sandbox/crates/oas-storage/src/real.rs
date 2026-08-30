@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oas_config::Config;
+use oas_config::{Config, copy_file_with_reflink};
 
 use crate::{DiskConfig, StorageError, StorageManager};
 
@@ -56,11 +56,48 @@ impl StorageManager for RealStorageManager {
             let rw_layer_path = if ty_has_rw {
                 let p: PathBuf = cfg.rw_base_dir.join(format!("{sid}.ext4"));
                 std::fs::create_dir_all(&cfg.rw_base_dir)?;
-                run(
-                    "truncate",
-                    &["-s", &format!("{}M", cfg.rw_size_mib), &p.to_string_lossy()],
-                )?;
-                run("mkfs.ext4", &["-F", &p.to_string_lossy()])?;
+                if let Some(template) = cfg.rw_template_path.as_ref() {
+                    if !template.is_file() {
+                        return Err(StorageError::Other(format!(
+                            "rw CoW template does not exist: {} (run tools/prepare_rw_template.sh first)",
+                            template.display()
+                        )));
+                    }
+                    let method = copy_file_with_reflink(
+                        template,
+                        &p,
+                        cfg.reflink_enabled,
+                        cfg.reflink_required,
+                    )
+                    .map_err(|e| {
+                        StorageError::Other(format!(
+                            "rw CoW template reflink {} -> {}: {e}",
+                            template.display(),
+                            p.display()
+                        ))
+                    })?;
+                    tracing::debug!(
+                        sandbox_id = %sid,
+                        template = %template.display(),
+                        destination = %p.display(),
+                        ?method,
+                        "provisioned reflink-backed ext4 rw layer"
+                    );
+                    // reflink 会复制 ext4 superblock，必须为每个实例生成新 UUID，
+                    // 否则 guest 内按 UUID 发现磁盘时可能把两个实例误认为同一设备。
+                    run("tune2fs", &["-U", "random", &p.to_string_lossy()])?;
+                } else if cfg.reflink_required {
+                    return Err(StorageError::Other(
+                        "rw_template_path is required when reflink_required=true".into(),
+                    ));
+                } else {
+                    // 仅作为显式开发回退；生产默认 reflink_required=true，不会走这里。
+                    run(
+                        "truncate",
+                        &["-s", &format!("{}M", cfg.rw_size_mib), &p.to_string_lossy()],
+                    )?;
+                    run("mkfs.ext4", &["-F", &p.to_string_lossy()])?;
+                }
                 Some(p.to_string_lossy().into_owned())
             } else {
                 None
@@ -79,5 +116,65 @@ impl StorageManager for RealStorageManager {
             let _ = std::fs::remove_file(p);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RealStorageManager;
+    use crate::StorageManager;
+    use oas_config::{Config, CopyMethod, copy_file_with_reflink};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn provision_uses_reflink_template_when_filesystem_supports_it() {
+        if Command::new("mkfs.ext4").arg("-V").output().is_err()
+            || Command::new("tune2fs").arg("-V").output().is_err()
+        {
+            return;
+        }
+        let root_base = std::env::var_os("OAS_TEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap());
+        let root = root_base.join(format!("oas-storage-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let template = root.join("rw-template.ext4");
+        let probe = root.join("probe.ext4");
+        let instance = root.join("rw").join("sandbox.ext4");
+        Command::new("truncate")
+            .args(["-s", "32M", &template.to_string_lossy()])
+            .status()
+            .unwrap();
+        assert!(
+            Command::new("mkfs.ext4")
+                .args(["-F", &template.to_string_lossy()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let method = copy_file_with_reflink(&template, &probe, true, false).unwrap();
+        if method != CopyMethod::Reflink {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        let mut cfg = Config::default();
+        cfg.rw_base_dir = root.join("rw");
+        cfg.rw_template_path = Some(template);
+        cfg.reflink_enabled = true;
+        cfg.reflink_required = true;
+        let manager = RealStorageManager::new(Arc::new(cfg));
+        let disk = manager.provision("sandbox", 1, None).await.unwrap();
+        assert_eq!(
+            disk.rw_layer_path.as_deref(),
+            Some(instance.to_str().unwrap())
+        );
+        assert!(instance.is_file());
+        manager.cleanup(&disk).await.unwrap();
+        let _ = fs::remove_file(probe);
+        let _ = fs::remove_dir_all(root);
     }
 }
