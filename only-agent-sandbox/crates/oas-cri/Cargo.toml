@@ -1,0 +1,20 @@
+[package]
+name = "oas-cri"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = "0.1"
+oas-manager = { path = "../oas-manager" }
+oas-types = { path = "../oas-types" }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-stream = { workspace = true }

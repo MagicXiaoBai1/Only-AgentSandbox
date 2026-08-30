@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sb-lite-__ID__
+  namespace: default
+  annotations:
+    agent-sandbox/type: "0"
+spec:
+  runtimeClassName: agent-firecracker
+  restartPolicy: Never
+  containers:
+    - name: workload
+      image: "agent-sandbox/lite:1.0"
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests: { cpu: "1", memory: "1Gi" }
+        limits:   { cpu: "1", memory: "1Gi" }

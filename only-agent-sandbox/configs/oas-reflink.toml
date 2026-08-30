@@ -1,0 +1,6 @@
+# OAS 生产配置片段：启用运行时 reflink，并禁止静默普通复制回退。
+# 将本文件中的字段合并到 /etc/oas/config.toml；路径必须在同一 XFS/btrfs 文件系统。
+
+reflink_enabled = true
+reflink_required = true
+rw_template_path = "/var/lib/oas/artifacts/rw-template.ext4"

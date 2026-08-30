@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sb-browser-__ID__
+  namespace: default
+  annotations:
+    agent-sandbox/type: "2"
+spec:
+  runtimeClassName: agent-firecracker
+  restartPolicy: Never
+  containers:
+    - name: workload
+      image: "agent-sandbox/browser:1.0"
+      resources:
+        requests: { cpu: "2", memory: "4Gi" }
+        limits:   { cpu: "2", memory: "4Gi" }
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+  volumes:
+    - name: dshm
+      emptyDir: { medium: Memory, sizeLimit: 1Gi }

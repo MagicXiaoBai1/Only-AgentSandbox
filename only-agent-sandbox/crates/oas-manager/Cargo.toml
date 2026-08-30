@@ -1,0 +1,16 @@
+[package]
+name = "oas-manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+tracing = { version = "0.1", features = ["log"] }
+tokio = { workspace = true }
+oas-types = { path = "../oas-types" }
+oas-config = { path = "../oas-config" }
+oas-driver = { path = "../oas-driver" }
+oas-net = { path = "../oas-net" }
+oas-storage = { path = "../oas-storage" }
+oas-store = { path = "../oas-store" }

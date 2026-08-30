@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package oas.shim;
+
+// Shim ↔ Runtime 内部契约（ttrpc over UDS）。最小三方法。
+// Create 同步阻塞到 Running/Failed；State 查实际态；Stop 幂等停。
+
+service Shim {
+  rpc Create(CreateRequest) returns (CreateResponse);
+  rpc State(StateRequest) returns (StateResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+}
+
+message CreateRequest {
+  string sandbox_id = 1;
+  string bundle_dir = 2;        // 宿主绝对路径，shim 自取 vmlinux/rootfs.ext4/vmstate/mem
+  string netns_path = 3;        // jailer --netns
+  string tap_name = 4;          // MVP 恒 tap0，CNI 兼容位（restore 不用于 override）
+  string rw_layer_path = 5;     // 可空（type 0 无可写层）
+  string cloud_disk_dev = 6;    // MVP 不支持，传空
+  uint32 jailer_uid = 7;
+  uint32 jailer_gid = 8;
+  string chroot_base_dir = 9;
+  string firecracker_bin = 10;
+  string jailer_bin = 11;
+}
+
+message CreateResponse {
+  string state = 1;   // Running / Failed
+  string error = 2;   // state=Failed 时的原因
+}
+
+message StateRequest {
+  string sandbox_id = 1;
+}
+
+message StateResponse {
+  string state = 1;   // Running / Stopped / Failed
+}
+
+message StopRequest {
+  string sandbox_id = 1;
+}
+
+message StopResponse {}

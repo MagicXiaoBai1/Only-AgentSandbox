@@ -1,0 +1,49 @@
+[package]
+name = "oas-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+tonic = { workspace = true }
+tokio-stream = { workspace = true }
+async-stream = { workspace = true }
+oas-cri = { path = "crates/oas-cri" }
+oas-manager = { path = "crates/oas-manager" }
+oas-store = { path = "crates/oas-store" }
+oas-config = { path = "crates/oas-config" }
+oas-driver = { path = "crates/oas-driver" }
+oas-net = { path = "crates/oas-net" }
+oas-storage = { path = "crates/oas-storage" }
+oas-mock = { path = "crates/oas-mock" }
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log"] }
+tracing-log = "0.2"
+tracing-appender = "0.2"
+clap = { version = "4", features = ["derive", "env"] }
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "1"
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+prost = "0.14.4"
+tonic-build = "0.14.6"
+tonic-prost-build = "0.14.6"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
+redb = "4.1"
+serde_json = "1"
+libc = "0.2"
+
+# 本地补丁：放宽 h2 server 的 :authority 校验，使 grpc-go（crictl/kubelet）经
+# Unix socket 调用时不被 PROTOCOL_ERROR 重置（grpc-go 把 socket 路径当 :authority）。
+# 详见 vendor/h2/src/server.rs 中 PATCH 注释。h2 上游修复后可移除。
+[patch.crates-io]
+h2 = { path = "vendor/h2" }
