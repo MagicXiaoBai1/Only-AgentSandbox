@@ -61,6 +61,35 @@ cat /workspace/oas-rw-test/result
 shim 日志中的 materialize、jailer spawn、snapshot load 和 readiness 阶段耗时。不要把
 单独的 reflink 文件复制时间当成端到端冷启动时间。
 
+## 2026-08-30 SDK 冷启动基准
+
+脚本：`sandbox_sdk_code_20260727/sdk/test/benchmark_cold_start.py`。
+原始结果：`/home/ck/oas-cold-start-rw-20260830.json`。
+
+链路为 HTTPS gateway/API 创建 sandbox、等待 guest-agent Ready、首次执行
+`cd /workspace`。测试进程仅把 node selector 覆盖为实际 OAS 节点
+`k3s-sandbox`，未改 Code Agent 源码。成功 10/10。
+
+端到端耗时（ms）：1323.973, 927.489, 926.055, 933.415, 1008.720,
+937.258, 924.726, 2934.728, 932.981, 945.973。
+
+| 指标 | 值 |
+| --- | --- |
+| mean | 1179.532 ms |
+| median / p50 | 935.337 ms |
+| p95（线性插值） | 约 2209.888 ms |
+| min | 924.726 ms |
+| max | 2934.728 ms |
+| stddev | 596.495 ms |
+| `wait_guest_ready_total` mean | 1105.175 ms |
+| `create_pod_api` mean | 19.184 ms |
+| `first_exec_cd` mean | 53.861 ms |
+
+第 8 次为离群值（2934.728 ms）。K8s API delete 后 CRI 侧可能残留
+NotReady sandbox/shim，核验时应用 `unix:///run/oas.sock` 列出并
+`crictl rmp --force`；若 shim 仍未退出，可在确认该节点无业务 Pod 后
+重启 `oas-runtime`。
+
 ## 回退
 
 停止创建新 sandbox，恢复安装脚本生成的 `/etc/oas/config.toml.bak.*` 和
