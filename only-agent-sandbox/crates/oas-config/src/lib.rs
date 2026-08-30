@@ -35,6 +35,35 @@ pub struct NetConfig {
     pub pod_cidr: String,
     /// pod 网关（信息字段）。
     pub pod_gateway: String,
+    /// guest-agent 监听端口；PodIP:port 会转发到 guest_ip:port。
+    #[serde(default = "default_guest_agent_port")]
+    pub guest_agent_port: u16,
+    #[serde(default = "default_true")]
+    pub enable_host_veth: bool,
+    #[serde(default = "default_pod_iface")]
+    pub pod_iface: String,
+    #[serde(default = "default_true")]
+    pub enable_guest_egress: bool,
+    #[serde(default = "default_true")]
+    pub wait_guest_agent: bool,
+    #[serde(default = "default_agent_wait_secs")]
+    pub guest_agent_wait_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_pod_iface() -> String {
+    "eth0".into()
+}
+
+fn default_agent_wait_secs() -> u64 {
+    30
+}
+
+fn default_guest_agent_port() -> u16 {
+    10000
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +165,12 @@ impl Default for Config {
                 guest_mac: "06:00:AC:10:00:02".into(),
                 pod_cidr: "10.244.0.0/24".into(),
                 pod_gateway: "10.244.0.254".into(),
+                guest_agent_port: 10000,
+                enable_host_veth: true,
+                pod_iface: "eth0".into(),
+                enable_guest_egress: true,
+                wait_guest_agent: true,
+                guest_agent_wait_secs: 30,
             },
             types: vec![
                 SandboxType {

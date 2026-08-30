@@ -14,6 +14,8 @@ pub struct NetConfig {
     pub pod_ip: String,
     pub gateway: String,
     pub lease: oas_types::IpLease,
+    /// 主机侧 veth 名；空串表示未启用。
+    pub host_veth: String,
 }
 
 /// 网络层错误。
@@ -38,5 +40,12 @@ pub trait NetworkManager: Send + Sync {
     async fn teardown(&self, net: &NetConfig) -> Result<(), NetError>;
 }
 
+pub mod cni;
+pub mod forward;
 pub mod real;
+pub use cni::{HostVethPlan, host_veth_plan, host_veth_setup_cmds, host_veth_teardown_cmds};
+pub use forward::{
+    GuestEgress, GuestPortForward, HostEgress, guest_egress_cmds, guest_port_forward_cmds,
+    host_egress_cmds,
+};
 pub use real::NetManager;

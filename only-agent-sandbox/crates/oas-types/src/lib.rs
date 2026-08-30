@@ -156,6 +156,9 @@ pub struct SandboxRecord {
     pub state: SandboxState,
     /// Unix 时间戳（秒）。
     pub created_at: i64,
+    /// 主机侧 veth 名；空串表示未启用或旧记录。
+    #[serde(default)]
+    pub host_veth: String,
 }
 
 /// `container` 表记录。`exit_code` / `reason` / `message` 由带外 agent 回灌（§21.4）。

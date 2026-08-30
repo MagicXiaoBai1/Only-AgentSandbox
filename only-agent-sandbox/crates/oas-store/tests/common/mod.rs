@@ -34,6 +34,7 @@ fn sb(id: &str, uid: &str, state: SandboxState) -> SandboxRecord {
         cloud_disk_dev: None,
         state,
         created_at: 100,
+        host_veth: String::new(),
     }
 }
 
@@ -104,7 +105,8 @@ fn sandbox_crud<S: Store>(make: &impl Fn() -> S) {
 
 fn sandbox_get_by_uid<S: Store>(make: &impl Fn() -> S) {
     let s = make();
-    s.put_sandbox(&sb("sb1", "uid1", SandboxState::Ready)).unwrap();
+    s.put_sandbox(&sb("sb1", "uid1", SandboxState::Ready))
+        .unwrap();
     assert_eq!(
         s.get_sandbox_by_uid("uid1").unwrap().unwrap().sandbox_id,
         "sb1"
@@ -136,7 +138,9 @@ fn sandbox_list_filters<S: Store>(make: &impl Fn() -> S) {
 
     // by label_selector
     let f = SandboxFilter {
-        label_selector: [("env".to_string(), "prod".to_string())].into_iter().collect(),
+        label_selector: [("env".to_string(), "prod".to_string())]
+            .into_iter()
+            .collect(),
         ..Default::default()
     };
     let r = s.list_sandboxes(&f).unwrap();
@@ -163,7 +167,9 @@ fn sandbox_list_filters<S: Store>(make: &impl Fn() -> S) {
 
     // 组合：label + state
     let f = SandboxFilter {
-        label_selector: [("env".to_string(), "prod".to_string())].into_iter().collect(),
+        label_selector: [("env".to_string(), "prod".to_string())]
+            .into_iter()
+            .collect(),
         state: Some(SandboxState::Ready),
         ..Default::default()
     };
@@ -172,7 +178,8 @@ fn sandbox_list_filters<S: Store>(make: &impl Fn() -> S) {
 
 fn sandbox_delete_idempotent<S: Store>(make: &impl Fn() -> S) {
     let s = make();
-    s.put_sandbox(&sb("sb1", "uid1", SandboxState::Ready)).unwrap();
+    s.put_sandbox(&sb("sb1", "uid1", SandboxState::Ready))
+        .unwrap();
     s.delete_sandbox("sb1").unwrap();
     match s.get_sandbox("sb1") {
         Err(StoreError::NotFound(_)) => {}
@@ -196,7 +203,10 @@ fn container_crud<S: Store>(make: &impl Fn() -> S) {
     let mut r2 = r.clone();
     r2.state = ContainerState::Running;
     s.put_container(&r2).unwrap();
-    assert_eq!(s.get_container("c1").unwrap().state, ContainerState::Running);
+    assert_eq!(
+        s.get_container("c1").unwrap().state,
+        ContainerState::Running
+    );
 
     match s.get_container("nope") {
         Err(StoreError::NotFound(_)) => {}
@@ -236,7 +246,9 @@ fn container_list_filters<S: Store>(make: &impl Fn() -> S) {
 
     // by label
     let f = ContainerFilter {
-        label_selector: [("tier".to_string(), "web".to_string())].into_iter().collect(),
+        label_selector: [("tier".to_string(), "web".to_string())]
+            .into_iter()
+            .collect(),
         ..Default::default()
     };
     assert_eq!(s.list_containers(&f).unwrap().len(), 1);
@@ -251,7 +263,8 @@ fn container_list_filters<S: Store>(make: &impl Fn() -> S) {
 
 fn container_delete_idempotent<S: Store>(make: &impl Fn() -> S) {
     let s = make();
-    s.put_container(&ct("c1", "sb1", ContainerState::Created)).unwrap();
+    s.put_container(&ct("c1", "sb1", ContainerState::Created))
+        .unwrap();
     s.delete_container("c1").unwrap();
     match s.get_container("c1") {
         Err(StoreError::NotFound(_)) => {}
@@ -357,7 +370,8 @@ fn metadata_passthrough<S: Store>(make: &impl Fn() -> S) {
     };
     r.labels.insert("a/b".into(), "v1".into());
     r.labels.insert("k".into(), "v2".into());
-    r.annotations.insert("agent-sandbox/type".into(), "1".into());
+    r.annotations
+        .insert("agent-sandbox/type".into(), "1".into());
     s.put_sandbox(&r).unwrap();
     let got = s.get_sandbox("sb1").unwrap();
     assert_eq!(got.metadata, r.metadata);

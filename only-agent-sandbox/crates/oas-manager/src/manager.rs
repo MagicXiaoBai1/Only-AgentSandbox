@@ -15,13 +15,13 @@ use oas_net::{NetConfig, NetError, NetworkManager};
 use oas_storage::{DiskConfig, StorageError, StorageManager};
 use oas_store::{Store, StoreError};
 use oas_types::{
-    ContainerExitReason, ContainerFilter, ContainerRecord, ContainerState, IpLease, SandboxId,
-    SandboxFilter, SandboxRecord, SandboxState,
+    ContainerExitReason, ContainerFilter, ContainerRecord, ContainerState, IpLease, SandboxFilter,
+    SandboxId, SandboxRecord, SandboxState,
 };
 
 use crate::{
-    Clock, CreateContainerRequest, CreateSandboxRequest, IdGenerator, ImageInfo, Manager,
-    OasError, PerKeyLock, RuntimeCondition, RuntimeStatusInfo, VersionInfo, VmReadiness,
+    Clock, CreateContainerRequest, CreateSandboxRequest, IdGenerator, ImageInfo, Manager, OasError,
+    PerKeyLock, RuntimeCondition, RuntimeStatusInfo, VersionInfo, VmReadiness,
 };
 
 /// 就绪等待超时（真实 eventfd 实现用；假实现可忽略）。
@@ -132,6 +132,7 @@ fn net_cfg_from(rec: &SandboxRecord) -> NetConfig {
             cidr: String::new(),
             sandbox_id: rec.sandbox_id.clone(),
         },
+        host_veth: rec.host_veth.clone(),
     }
 }
 
@@ -216,7 +217,11 @@ impl Manager for OasManager {
         // storage.provision。
         let disk = match self
             .storage
-            .provision(sandbox_id.as_str(), req.type_id, req.cloud_disk_ref.as_deref())
+            .provision(
+                sandbox_id.as_str(),
+                req.type_id,
+                req.cloud_disk_ref.as_deref(),
+            )
             .await
         {
             Ok(d) => d,
@@ -251,7 +256,8 @@ impl Manager for OasManager {
             .wait_ready(&sandbox_id, READINESS_TIMEOUT)
             .await
         {
-            self.rollback_create(&net_cfg, &disk, Some(&sandbox_id)).await;
+            self.rollback_create(&net_cfg, &disk, Some(&sandbox_id))
+                .await;
             return Err(oe);
         }
 
@@ -272,13 +278,15 @@ impl Manager for OasManager {
             cloud_disk_dev: disk.cloud_disk_dev.clone(),
             state: SandboxState::Ready,
             created_at: self.clock.now_unix_secs(),
+            host_veth: net_cfg.host_veth.clone(),
         };
         let rec_clone = rec.clone();
         if let Err(e) = self
             .store
             .transaction(Box::new(move |t| t.put_sandbox(&rec_clone)))
         {
-            self.rollback_create(&net_cfg, &disk, Some(&sandbox_id)).await;
+            self.rollback_create(&net_cfg, &disk, Some(&sandbox_id))
+                .await;
             return Err(map_store_err(e));
         }
         Ok(sandbox_id.0)
@@ -342,9 +350,10 @@ impl Manager for OasManager {
             .store
             .get_sandbox(&req.pod_sandbox_id)
             .map_err(map_store_err)?;
-        let ty = self.cfg.get_type(sb.type_id).ok_or_else(|| {
-            OasError::Internal(format!("unknown type_id: {}", sb.type_id))
-        })?;
+        let ty = self
+            .cfg
+            .get_type(sb.type_id)
+            .ok_or_else(|| OasError::Internal(format!("unknown type_id: {}", sb.type_id)))?;
 
         // 镜像白名单（ImageNotInList → CRI not_found）。
         if !ty.image_allowed(&req.image) {
@@ -386,7 +395,11 @@ impl Manager for OasManager {
         }
 
         let container_id = self.id_gen.container_id();
-        let env: Vec<String> = req.envs.iter().map(|kv| format!("{}={}", kv.key, kv.value)).collect();
+        let env: Vec<String> = req
+            .envs
+            .iter()
+            .map(|kv| format!("{}={}", kv.key, kv.value))
+            .collect();
         let rec = ContainerRecord {
             container_id: container_id.clone(),
             sandbox_id: req.pod_sandbox_id.clone(),
@@ -569,10 +582,7 @@ impl Manager for OasManager {
     }
 
     async fn list_images(&self) -> Result<Vec<ImageInfo>, OasError> {
-        Ok(self.cfg.all_images()
-            .into_iter()
-            .map(image_info)
-            .collect())
+        Ok(self.cfg.all_images().into_iter().map(image_info).collect())
     }
 
     async fn remove_image(&self, _image: &str) -> Result<(), OasError> {

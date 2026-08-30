@@ -175,7 +175,11 @@ impl FirecrackerDriver for MockDriver {
         Ok(())
     }
 
-    async fn start_container(&self, vm_id: &SandboxId, container_id: &str) -> Result<(), DriverError> {
+    async fn start_container(
+        &self,
+        vm_id: &SandboxId,
+        container_id: &str,
+    ) -> Result<(), DriverError> {
         self.container_starts
             .lock()
             .unwrap()
@@ -196,7 +200,11 @@ impl FirecrackerDriver for MockDriver {
         Ok(())
     }
 
-    async fn remove_container(&self, vm_id: &SandboxId, container_id: &str) -> Result<(), DriverError> {
+    async fn remove_container(
+        &self,
+        vm_id: &SandboxId,
+        container_id: &str,
+    ) -> Result<(), DriverError> {
         self.container_removes
             .lock()
             .unwrap()
@@ -281,14 +289,12 @@ impl NetworkManager for MockNet {
             pod_ip: lease.ip.clone(),
             gateway: self.gateway.clone(),
             lease,
+            host_veth: String::new(),
         })
     }
 
     async fn teardown(&self, net: &NetConfig) -> Result<(), NetError> {
-        self.teardowns
-            .lock()
-            .unwrap()
-            .push(net.lease.ip.clone());
+        self.teardowns.lock().unwrap().push(net.lease.ip.clone());
         self.store
             .release_ip(&net.lease)
             .map_err(|e| NetError::Other(e.to_string()))?;

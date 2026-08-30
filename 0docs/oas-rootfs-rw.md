@@ -36,6 +36,13 @@ sudo ./tools/install_reflink_runtime.sh
 将目标 type 的 `bundle` 改为 `base-1-agent-rw`，审核配置备份后重启
 `oas-runtime`。运行中的 sandbox 不会自动切换 bundle，应先排空或销毁。
 
+Code Agent 链路还要求 OAS 为每个 sandbox 建立 host veth，并在 netns 内将
+`PodIP:10000` DNAT 到 `172.16.0.2:10000`。因此生产配置应保留
+`enable_host_veth=true`、`guest_agent_port=10000` 和
+`enable_guest_egress=true`。type 1 的 `mem_mib` 是容器资源校验预算；它至少要
+覆盖 Pod Manager 声明的容器 memory limit（当前为 2048 MiB），并不改变已烘焙
+snapshot 的 guest 内存布局。
+
 ## 验证
 
 每次新建 sandbox 后至少验证：
